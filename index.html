@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Exam Calendar</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css?v=10" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <div class="ambient ambient-left"></div>
+      <div class="ambient ambient-right"></div>
+
+      <main class="app">
+        <section class="hero topbar">
+          <div class="hero-copy">
+            <p class="eyebrow">Spring 2026</p>
+            <h1>Exam Calendar</h1>
+            <p class="hero-text">Upcoming exams, deadlines, and same-day conflicts.</p>
+          </div>
+
+          <div class="hero-panel">
+            <p class="panel-label">Next Up</p>
+            <div id="nextExamCard" class="next-exam-card" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section class="stats-grid" aria-label="Overview">
+          <article class="stat-card">
+            <span class="stat-label">Total events</span>
+            <strong id="totalEvents" class="stat-value"></strong>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Days left in schedule</span>
+            <strong id="scheduleSpan" class="stat-value"></strong>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Same-day crunches</span>
+            <strong id="conflictCount" class="stat-value"></strong>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">Courses covered</span>
+            <strong id="courseCount" class="stat-value"></strong>
+          </article>
+        </section>
+
+        <section class="board">
+          <div class="board-header">
+            <div>
+              <p class="section-kicker">Timeline</p>
+              <h2>Upcoming exams and deadlines</h2>
+            </div>
+            <div class="board-controls">
+              <div class="board-actions">
+                <span class="board-label">Actions</span>
+                <button id="openCoursesButton" class="ghost-button board-pill" type="button">Courses</button>
+                <button id="openComposerButton" class="primary-button board-pill" type="button">Add Item</button>
+              </div>
+              <div class="board-key">
+                <span class="board-label">Key</span>
+                <div class="legend" aria-label="Legend">
+                  <span class="legend-chip"><span class="legend-dot urgent"></span> Soon</span>
+                  <span class="legend-chip"><span class="legend-dot warning"></span> Same-day stack</span>
+                  <span class="legend-chip"><span class="legend-dot calm"></span> Later</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="filter-bar" aria-label="Filters">
+            <span class="board-label">Filters</span>
+            <div class="filter-controls">
+              <label class="filter-field">
+                <span>Type</span>
+                <select id="typeFilterSelect">
+                  <option value="all">All items</option>
+                  <option value="exam">Exams</option>
+                  <option value="deadline">Deadlines</option>
+                </select>
+              </label>
+              <label class="filter-field">
+                <span>Course</span>
+                <select id="courseFilterSelect"></select>
+              </label>
+              <button id="clearFiltersButton" class="ghost-button filter-reset" type="button">Clear</button>
+            </div>
+          </div>
+
+          <section id="examGrid" class="exam-grid" aria-live="polite"></section>
+        </section>
+      </main>
+    </div>
+
+    <div id="composerModal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal="composer"></div>
+      <section class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="composerHeading">
+        <div class="modal-shell">
+          <div class="modal-topbar">
+            <div>
+              <p class="section-kicker">Add Item</p>
+              <h2 id="composerHeading">Add to your calendar</h2>
+              <p class="modal-text">Choose a type, fill in the basics, and save it.</p>
+            </div>
+            <button id="closeComposerButton" class="ghost-button" type="button">Close</button>
+          </div>
+
+          <form id="eventForm" class="modal-form" novalidate>
+            <div class="simple-grid">
+              <div class="field field-wide">
+                <span>Type</span>
+                <div class="type-toggle" role="radiogroup" aria-label="Event type">
+                  <label class="type-option">
+                    <input type="radio" name="type" value="exam" checked />
+                    <span>Exam</span>
+                  </label>
+                  <label class="type-option">
+                    <input type="radio" name="type" value="deadline" />
+                    <span>Deadline</span>
+                  </label>
+                </div>
+              </div>
+
+              <label class="field field-wide">
+                <span>Title</span>
+                <input id="eventName" name="event" type="text" placeholder="Midterm 2" required />
+              </label>
+
+              <label class="field">
+                <span>Course</span>
+                <select id="eventCourseSelect" name="course" required></select>
+              </label>
+
+              <label class="field">
+                <span>Date</span>
+                <input id="eventDate" name="date" type="date" required />
+              </label>
+
+              <div id="examTimeGroup" class="field-group-inline field-wide">
+                <label class="field">
+                  <span>Start time</span>
+                  <input id="eventStartTime" name="start_time" type="time" />
+                </label>
+                <label class="field">
+                  <span>End time</span>
+                  <input id="eventEndTime" name="end_time" type="time" />
+                </label>
+              </div>
+
+              <label id="deadlineTimeField" class="field field-wide is-hidden">
+                <span>Due time</span>
+                <input id="eventDueTime" name="due_time" type="time" />
+              </label>
+
+              <label class="field field-wide">
+                <span>Notes</span>
+                <textarea id="eventNotes" name="notes" rows="3" placeholder="Optional details"></textarea>
+              </label>
+            </div>
+
+            <div class="form-actions">
+              <button id="submitButton" type="submit" class="primary-button">Add exam</button>
+              <p id="formMessage" class="form-message" aria-live="polite"></p>
+            </div>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <div id="coursesModal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal="courses"></div>
+      <section class="modal-dialog narrow" role="dialog" aria-modal="true" aria-labelledby="coursesHeading">
+        <div class="modal-shell">
+          <div class="modal-topbar">
+            <div>
+              <p class="section-kicker">Courses</p>
+              <h2 id="coursesHeading">Manage enrolled courses</h2>
+              <p class="modal-text">Add the classes you want available in the event form.</p>
+            </div>
+            <button id="closeCoursesButton" class="ghost-button" type="button">Close</button>
+          </div>
+
+          <form id="courseForm" class="course-form">
+            <label class="field grow">
+              <span>Course name</span>
+              <input id="courseNameInput" name="course_name" type="text" placeholder="Chem 101" required />
+            </label>
+            <button type="submit" class="primary-button">Add course</button>
+          </form>
+
+          <p id="courseMessage" class="form-message" aria-live="polite"></p>
+          <div id="courseList" class="course-list" aria-live="polite"></div>
+        </div>
+      </section>
+    </div>
+
+    <div id="confirmModal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <section class="modal-dialog narrow" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <div class="modal-shell confirm-shell">
+          <p class="section-kicker">Confirm</p>
+          <h2 id="confirmTitle">Remove item?</h2>
+          <p id="confirmBody" class="modal-text"></p>
+          <div class="confirm-actions">
+            <button id="confirmCancelButton" class="ghost-button" type="button">Cancel</button>
+            <button id="confirmApproveButton" class="danger-button" type="button">Delete</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script src="./script.js?v=10"></script>
+  </body>
+</html>
