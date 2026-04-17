@@ -371,7 +371,7 @@ body::before {
   min-height: 100dvh;
   max-height: 100dvh;
   padding: 22px 18px 24px;
-  border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
+  border-radius: 0;
   border: 1px solid rgba(15, 23, 42, 0.14);
   background:
     linear-gradient(180deg, rgba(11, 26, 48, 0.96), rgba(18, 41, 72, 0.92)),
