@@ -82,6 +82,49 @@ export function formatCountdown(days) {
   return `${days} days left`;
 }
 
+function isValidCompletedAt(value = "") {
+  return typeof value === "string" && value.trim() && !Number.isNaN(Date.parse(value));
+}
+
+export function getEventStatus(event = {}) {
+  return event.status === "completed" ? "completed" : "open";
+}
+
+export function getEventDueAt(event = {}) {
+  const dueDate = parseLocalDate(event.date);
+  const fallbackHours = 23;
+  const fallbackMinutes = 59;
+  const timeValue =
+    event.type === "deadline"
+      ? normalizeTimeValue(event.startTime || event.endTime)
+      : normalizeTimeValue(event.endTime || event.startTime);
+
+  if (!timeValue) {
+    dueDate.setHours(fallbackHours, fallbackMinutes, 59, 999);
+    return dueDate;
+  }
+
+  const [hours, minutes] = timeValue.split(":").map(Number);
+  dueDate.setHours(hours, minutes, 0, 0);
+  return dueDate;
+}
+
+export function isEventCompleted(event = {}, now = new Date()) {
+  if (event.type === "exam" && event.date) {
+    return getEventDueAt(event).getTime() < now.getTime();
+  }
+
+  return getEventStatus(event) === "completed";
+}
+
+export function isEventOverdue(event = {}, now = new Date()) {
+  if (isEventCompleted(event) || !event.date) {
+    return false;
+  }
+
+  return getEventDueAt(event).getTime() < now.getTime();
+}
+
 export function truncateText(value, maxLength = 42) {
   if (!value) {
     return "";
@@ -90,13 +133,38 @@ export function truncateText(value, maxLength = 42) {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1).trimEnd()}...` : value;
 }
 
-export function getCountdownTone(days, hasConflict) {
-  if (days <= 3) {
-    return "urgent";
+function getSaturdayPlanningWindow(today = startOfToday()) {
+  const start = new Date(today);
+  const dayIndex = start.getDay();
+  const daysSinceSaturday = (dayIndex - 6 + 7) % 7;
+
+  start.setDate(start.getDate() - daysSinceSaturday);
+  start.setHours(0, 0, 0, 0);
+
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  end.setHours(23, 59, 59, 999);
+
+  return { start, end };
+}
+
+export function isDateInSaturdayPlanningWeek(dateString, today = startOfToday()) {
+  const date = parseLocalDate(dateString);
+  date.setHours(12, 0, 0, 0);
+
+  const { start, end } = getSaturdayPlanningWindow(today);
+  return date >= start && date <= end;
+}
+
+export function getCountdownTone(dateString) {
+  const days = daysUntil(dateString);
+
+  if (days < 0) {
+    return "overdue";
   }
 
-  if (hasConflict) {
-    return "warning";
+  if (days === 0 || isDateInSaturdayPlanningWeek(dateString)) {
+    return "urgent";
   }
 
   return "";
@@ -271,10 +339,15 @@ export function normalizeEvent(rawEvent = {}) {
     startTime,
     endTime,
   });
+  const status = getEventStatus(rawEvent);
+  const completedAt = status === "completed" && isValidCompletedAt(rawEvent.completedAt)
+    ? rawEvent.completedAt.trim()
+    : "";
 
   return {
     id: typeof rawEvent.id === "string" && rawEvent.id ? rawEvent.id : generateId("evt"),
     type: normalizedType,
+    status,
     date: typeof rawEvent.date === "string" ? rawEvent.date.trim() : "",
     course: typeof rawEvent.course === "string" ? rawEvent.course.trim() : "",
     event: typeof rawEvent.event === "string" ? rawEvent.event.trim() : "",
@@ -282,6 +355,7 @@ export function normalizeEvent(rawEvent = {}) {
     endTime,
     displayTime: rawDisplayTime || computedDisplayTime,
     notes: LEGACY_SAME_DAY_NOTES.has(normalizedNotes) ? SAME_DAY_NOTE : normalizedNotes,
+    completedAt,
   };
 }
 

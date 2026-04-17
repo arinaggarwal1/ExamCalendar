@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=20" />
+    <link rel="stylesheet" href="./styles.css?v=45" />
   </head>
   <body>
     <div class="page-shell">
@@ -21,51 +21,101 @@
       <div class="workspace">
         <aside class="sidebar" aria-label="Primary">
           <div class="sidebar-brand">
-            <p id="sidebarSemesterLabel" class="eyebrow">Spring 2026</p>
-            <p id="sidebarSemesterRange" class="sidebar-semester-range"></p>
-            <h1>Exam Calendar</h1>
-            <p class="sidebar-text">Track exams, deadlines, and same-day crunches.</p>
-          </div>
-
-          <div class="sidebar-actions">
-            <button id="openComposerButton" class="primary-button side-button" type="button">Add Item</button>
-            <button id="openCoursesButton" class="ghost-button side-button" type="button">Manage Courses</button>
-          </div>
-
-          <section class="sidebar-utility" aria-label="Filters and legend">
-            <div class="sidebar-utility-head">
-              <span class="board-label">Filters</span>
+            <div class="sidebar-brand-copy">
+              <p id="sidebarSemesterLabel" class="eyebrow">Spring 2026</p>
+              <h1>Exam Calendar</h1>
             </div>
-            <div class="filter-controls" aria-label="Filters">
-              <label class="filter-field">
-                <span>Type</span>
-                <select id="typeFilterSelect">
-                  <option value="all">All items</option>
-                  <option value="exam">Exams</option>
-                  <option value="deadline">Deadlines</option>
-                </select>
-              </label>
-              <label class="filter-field">
-                <span>Course</span>
-                <select id="courseFilterSelect"></select>
-              </label>
-              <button id="clearFiltersButton" class="ghost-button filter-reset" type="button">Clear Filters</button>
-            </div>
-            <div class="sidebar-utility-head">
-              <span class="board-label">Key</span>
-            </div>
-            <div class="legend" aria-label="Legend">
-              <span class="legend-chip"><span class="legend-dot urgent"></span> Soon</span>
-              <span class="legend-chip"><span class="legend-dot warning"></span> Same-day stack</span>
-              <span class="legend-chip"><span class="legend-dot calm"></span> Later</span>
-            </div>
-          </section>
-
-          <div class="sidebar-foot">
-            <button id="accountButton" class="account-button" type="button">
-              <span id="accountName" class="account-name">Account</span>
-              <span id="accountHint" class="account-hint">Account settings</span>
+            <button
+              id="sidebarToggleButton"
+              class="sidebar-toggle"
+              type="button"
+              aria-label="Open sidebar menu"
+              aria-expanded="false"
+              aria-controls="sidebarContent"
+            >
+              <span class="sidebar-toggle-line"></span>
+              <span class="sidebar-toggle-line"></span>
+              <span class="sidebar-toggle-line"></span>
             </button>
+          </div>
+
+          <div id="sidebarContent" class="sidebar-collapsible">
+            <div class="sidebar-actions">
+              <button id="openComposerButton" class="primary-button side-button" type="button">Add Item</button>
+              <button id="openCoursesButton" class="ghost-button side-button" type="button">Manage Courses</button>
+            </div>
+
+            <section class="sidebar-utility" aria-label="Filters and legend">
+              <div class="sidebar-utility-head">
+                <span class="board-label">Filters</span>
+              </div>
+              <div class="filter-controls" aria-label="Filters">
+                <label class="filter-field">
+                  <span>Status</span>
+                  <select id="statusFilterSelect">
+                    <option value="all">All items</option>
+                    <option value="open">Open only</option>
+                    <option value="overdue">Overdue only</option>
+                    <option value="completed">Completed only</option>
+                  </select>
+                </label>
+                <label class="filter-field">
+                  <span>Course</span>
+                  <select id="courseFilterSelect"></select>
+                </label>
+                <label class="filter-field">
+                  <span>Type</span>
+                  <select id="typeFilterSelect">
+                    <option value="all">All types</option>
+                    <option value="exam">Exams</option>
+                    <option value="deadline">Deadlines</option>
+                  </select>
+                </label>
+                <button id="clearFiltersButton" class="ghost-button filter-reset" type="button">Clear Filters</button>
+              </div>
+              <div class="sidebar-utility-head">
+                <span class="board-label">Key</span>
+              </div>
+              <div class="legend" aria-label="Legend">
+                <span
+                  class="legend-chip"
+                  aria-label="Overdue: the due time or exam end time has already passed."
+                  data-tooltip="Past due time or exam end time."
+                  tabindex="0"
+                ><span class="legend-dot overdue"></span> Overdue</span>
+                <span
+                  class="legend-chip"
+                  aria-label="Done: marked completed, but still visible in your schedule."
+                  data-tooltip="Completed, still visible."
+                  tabindex="0"
+                ><span class="legend-dot completed"></span> Done</span>
+                <span
+                  class="legend-chip"
+                  aria-label="Soon: today or inside the current Saturday-Friday planning week."
+                  data-tooltip="Today or this Sat-Fri planning week."
+                  tabindex="0"
+                ><span class="legend-dot urgent"></span> Soon</span>
+                <span
+                  class="legend-chip"
+                  aria-label="Same-day stack: more than one item falls on the same date."
+                  data-tooltip="Multiple items on one date."
+                  tabindex="0"
+                ><span class="legend-dot warning"></span> Same-day stack</span>
+                <span
+                  class="legend-chip"
+                  aria-label="Later: open item outside the current Saturday-Friday planning week."
+                  data-tooltip="Outside this Sat-Fri planning week."
+                  tabindex="0"
+                ><span class="legend-dot calm"></span> Later</span>
+              </div>
+            </section>
+
+            <div class="sidebar-foot">
+              <button id="accountButton" class="account-button" type="button">
+                <span id="accountName" class="account-name">Account</span>
+                <span id="accountHint" class="account-hint">Account settings</span>
+              </button>
+            </div>
           </div>
         </aside>
 
@@ -86,7 +136,7 @@
 
           <section class="stats-grid" aria-label="Overview">
             <article class="stat-card">
-              <span class="stat-label">Total events</span>
+              <span class="stat-label">Overdue items</span>
               <strong id="totalEvents" class="stat-value"></strong>
             </article>
             <article class="stat-card">
@@ -98,8 +148,12 @@
               <strong id="conflictCount" class="stat-value"></strong>
             </article>
             <article class="stat-card">
-              <span class="stat-label">Courses covered</span>
-              <strong id="courseCount" class="stat-value"></strong>
+              <span class="stat-label">Deadlines left</span>
+              <strong id="deadlinesLeft" class="stat-value"></strong>
+            </article>
+            <article class="stat-card">
+              <span class="stat-label">Exams left</span>
+              <strong id="examsLeft" class="stat-value"></strong>
             </article>
           </section>
 
@@ -107,7 +161,7 @@
             <div class="board-header">
               <div>
                 <p class="section-kicker">Timeline</p>
-                <h2>Upcoming exams and deadlines</h2>
+                <h2>Exams and deadlines</h2>
               </div>
             </div>
 
@@ -162,9 +216,40 @@
               </label>
 
               <label class="lock-time-toggle field-wide">
-                <input id="eventUseCourseTiming" name="use_course_timing" type="checkbox" />
+                <input
+                  id="eventUseCourseTiming"
+                  name="use_course_timing"
+                  type="checkbox"
+                  data-deadline-preset="before-class"
+                />
                 <span id="eventTimingPresetLabel">During class</span>
               </label>
+
+              <div
+                id="deadlinePresetGroup"
+                class="deadline-preset-grid field-wide is-hidden"
+                role="group"
+                aria-label="Deadline time presets"
+              >
+                <label class="lock-time-toggle">
+                  <input
+                    id="eventDeadlineAfterClass"
+                    name="deadline_after_class"
+                    type="checkbox"
+                    data-deadline-preset="after-class"
+                  />
+                  <span>After Class</span>
+                </label>
+                <label class="lock-time-toggle">
+                  <input
+                    id="eventDeadlineEndOfDay"
+                    name="deadline_end_of_day"
+                    type="checkbox"
+                    data-deadline-preset="end-of-day"
+                  />
+                  <span>End of Day (11:59pm)</span>
+                </label>
+              </div>
 
               <div id="examTimeGroup" class="field-group-inline field-wide">
                 <label class="field">
@@ -309,9 +394,40 @@
               </label>
 
               <label class="lock-time-toggle field-wide">
-                <input id="editEventUseCourseTiming" name="edit_use_course_timing" type="checkbox" />
+                <input
+                  id="editEventUseCourseTiming"
+                  name="edit_use_course_timing"
+                  type="checkbox"
+                  data-deadline-preset="before-class"
+                />
                 <span id="editTimingPresetLabel">During class</span>
               </label>
+
+              <div
+                id="editDeadlinePresetGroup"
+                class="deadline-preset-grid field-wide is-hidden"
+                role="group"
+                aria-label="Edit deadline time presets"
+              >
+                <label class="lock-time-toggle">
+                  <input
+                    id="editDeadlineAfterClass"
+                    name="edit_deadline_after_class"
+                    type="checkbox"
+                    data-deadline-preset="after-class"
+                  />
+                  <span>After Class</span>
+                </label>
+                <label class="lock-time-toggle">
+                  <input
+                    id="editDeadlineEndOfDay"
+                    name="edit_deadline_end_of_day"
+                    type="checkbox"
+                    data-deadline-preset="end-of-day"
+                  />
+                  <span>End of Day (11:59pm)</span>
+                </label>
+              </div>
 
               <div id="editExamTimeGroup" class="field-group-inline field-wide">
                 <label class="field">
@@ -459,6 +575,6 @@
       </section>
     </div>
 
-    <script type="module" src="./script.js?v=19"></script>
+    <script type="module" src="./script.js?v=33"></script>
   </body>
 </html>

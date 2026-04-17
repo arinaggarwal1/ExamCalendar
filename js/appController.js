@@ -23,6 +23,14 @@ import {
   startOfToday,
 } from "./utils.js";
 
+const DEADLINE_END_OF_DAY_TIME = "23:59";
+const DEADLINE_PRESETS = {
+  beforeClass: "before-class",
+  afterClass: "after-class",
+  endOfDay: "end-of-day",
+};
+const CLASS_BASED_DEADLINE_PRESETS = new Set([DEADLINE_PRESETS.beforeClass, DEADLINE_PRESETS.afterClass]);
+
 function createDefaultSetupState(overrides = {}) {
   return {
     semesterLabel: "",
@@ -39,6 +47,14 @@ function createDefaultSetupState(overrides = {}) {
   };
 }
 
+const DEFAULT_FILTERS = {
+  type: "all",
+  course: "all",
+  status: "all",
+};
+
+const STATUS_FILTERS = new Set(["all", "open", "overdue", "completed"]);
+
 export function createAppController({ dom, sessionService, scheduleRepository }) {
   const state = {
     authInitialized: false,
@@ -53,10 +69,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       startDate: DEFAULT_SEMESTER_START_DATE,
       endDate: DEFAULT_SEMESTER_END_DATE,
     },
-    filters: {
-      type: "all",
-      course: "all",
-    },
+    filters: { ...DEFAULT_FILTERS },
     setup: createDefaultSetupState(),
   };
 
@@ -66,6 +79,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   let editingEventId = null;
   let editingCourseOriginalName = null;
   let isDeletingAccount = false;
+  let eventPersistenceQueue = Promise.resolve();
 
   function getSelectedType() {
     const selectedInput = dom.eventTypeInputs.find((input) => input.checked);
@@ -180,40 +194,107 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     state.setup = createDefaultSetupState(overrides);
   }
 
+  function getSelectedDeadlinePreset(presetInputs) {
+    return presetInputs.find((input) => input.checked)?.dataset.deadlinePreset ?? "";
+  }
+
+  function setSelectedDeadlinePreset(presetInputs, selectedPreset) {
+    presetInputs.forEach((input) => {
+      input.checked = Boolean(selectedPreset) && input.dataset.deadlinePreset === selectedPreset;
+    });
+  }
+
+  function syncDeadlinePresetSelection(presetInputs, changedInput) {
+    if (!changedInput?.checked) {
+      return;
+    }
+
+    setSelectedDeadlinePreset(presetInputs, changedInput.dataset.deadlinePreset ?? "");
+  }
+
+  function getComposerDeadlinePreset() {
+    return getSelectedDeadlinePreset(dom.eventDeadlinePresetInputs);
+  }
+
+  function getEditDeadlinePreset() {
+    return getSelectedDeadlinePreset(dom.editDeadlinePresetInputs);
+  }
+
+  function composerNeedsCourseDayPresetValidation() {
+    if (getSelectedType() === "exam") {
+      return dom.eventUseCourseTimingInput.checked;
+    }
+
+    return CLASS_BASED_DEADLINE_PRESETS.has(getComposerDeadlinePreset());
+  }
+
+  function editNeedsCourseDayPresetValidation() {
+    if (getSelectedEditType() === "exam") {
+      return dom.editEventUseCourseTimingInput.checked;
+    }
+
+    return CLASS_BASED_DEADLINE_PRESETS.has(getEditDeadlinePreset());
+  }
+
+  function getDeadlinePresetTime(preset, course) {
+    if (preset === DEADLINE_PRESETS.beforeClass) {
+      return course?.startTime ?? "";
+    }
+
+    if (preset === DEADLINE_PRESETS.afterClass) {
+      return course?.endTime ?? "";
+    }
+
+    if (preset === DEADLINE_PRESETS.endOfDay) {
+      return DEADLINE_END_OF_DAY_TIME;
+    }
+
+    return "";
+  }
+
   function syncComposerPresetLabel() {
     const type = getSelectedType();
-    dom.eventTimingPresetLabel.textContent = type === "exam" ? "During class" : "Before class";
+    dom.eventTimingPresetLabel.textContent = type === "exam" ? "During class" : "Before Class";
   }
 
   function syncEditPresetLabel() {
     const type = getSelectedEditType();
-    dom.editTimingPresetLabel.textContent = type === "exam" ? "During class" : "Before class";
+    dom.editTimingPresetLabel.textContent = type === "exam" ? "During class" : "Before Class";
   }
 
   function applyComposerCourseTimingPreset({ clearMessage = false } = {}) {
     syncComposerPresetLabel();
+    const selectedType = getSelectedType();
+    const isExam = selectedType === "exam";
     const selectedCourse = getCourseBySelection(dom.eventCourseSelect.value);
     const hasSchedule = courseHasClassSchedule(selectedCourse);
-    const shouldLockTimes = dom.eventUseCourseTimingInput.checked && hasSchedule;
+    let selectedDeadlinePreset = isExam ? "" : getComposerDeadlinePreset();
+    const shouldLockCourseTimes = isExam && dom.eventUseCourseTimingInput.checked && hasSchedule;
 
     dom.eventUseCourseTimingInput.disabled = !hasSchedule;
+    dom.eventDeadlineAfterClassInput.disabled = !hasSchedule;
 
     if (!hasSchedule) {
-      dom.eventUseCourseTimingInput.checked = false;
-    }
-
-    if (shouldLockTimes && selectedCourse) {
-      if (getSelectedType() === "exam") {
-        dom.eventStartTimeInput.value = selectedCourse.startTime;
-        dom.eventEndTimeInput.value = selectedCourse.endTime;
-      } else {
-        dom.eventDueTimeInput.value = selectedCourse.startTime;
+      if (isExam) {
+        dom.eventUseCourseTimingInput.checked = false;
+      } else if (CLASS_BASED_DEADLINE_PRESETS.has(selectedDeadlinePreset)) {
+        setSelectedDeadlinePreset(dom.eventDeadlinePresetInputs, "");
+        selectedDeadlinePreset = "";
       }
     }
 
-    dom.eventStartTimeInput.disabled = shouldLockTimes;
-    dom.eventEndTimeInput.disabled = shouldLockTimes;
-    dom.eventDueTimeInput.disabled = shouldLockTimes;
+    if (isExam && shouldLockCourseTimes && selectedCourse) {
+      dom.eventStartTimeInput.value = selectedCourse.startTime;
+      dom.eventEndTimeInput.value = selectedCourse.endTime;
+    }
+
+    if (!isExam && selectedDeadlinePreset) {
+      dom.eventDueTimeInput.value = getDeadlinePresetTime(selectedDeadlinePreset, selectedCourse);
+    }
+
+    dom.eventStartTimeInput.disabled = shouldLockCourseTimes;
+    dom.eventEndTimeInput.disabled = shouldLockCourseTimes;
+    dom.eventDueTimeInput.disabled = !isExam && Boolean(selectedDeadlinePreset);
 
     if (clearMessage) {
       setFormMessage("");
@@ -222,28 +303,37 @@ export function createAppController({ dom, sessionService, scheduleRepository })
 
   function applyEditCourseTimingPreset({ clearMessage = false } = {}) {
     syncEditPresetLabel();
+    const selectedType = getSelectedEditType();
+    const isExam = selectedType === "exam";
     const selectedCourse = getCourseBySelection(dom.editEventCourseSelect.value);
     const hasSchedule = courseHasClassSchedule(selectedCourse);
-    const shouldLockTimes = dom.editEventUseCourseTimingInput.checked && hasSchedule;
+    let selectedDeadlinePreset = isExam ? "" : getEditDeadlinePreset();
+    const shouldLockCourseTimes = isExam && dom.editEventUseCourseTimingInput.checked && hasSchedule;
 
     dom.editEventUseCourseTimingInput.disabled = !hasSchedule;
+    dom.editDeadlineAfterClassInput.disabled = !hasSchedule;
 
     if (!hasSchedule) {
-      dom.editEventUseCourseTimingInput.checked = false;
-    }
-
-    if (shouldLockTimes && selectedCourse) {
-      if (getSelectedEditType() === "exam") {
-        dom.editEventStartTimeInput.value = selectedCourse.startTime;
-        dom.editEventEndTimeInput.value = selectedCourse.endTime;
-      } else {
-        dom.editEventDueTimeInput.value = selectedCourse.startTime;
+      if (isExam) {
+        dom.editEventUseCourseTimingInput.checked = false;
+      } else if (CLASS_BASED_DEADLINE_PRESETS.has(selectedDeadlinePreset)) {
+        setSelectedDeadlinePreset(dom.editDeadlinePresetInputs, "");
+        selectedDeadlinePreset = "";
       }
     }
 
-    dom.editEventStartTimeInput.disabled = shouldLockTimes;
-    dom.editEventEndTimeInput.disabled = shouldLockTimes;
-    dom.editEventDueTimeInput.disabled = shouldLockTimes;
+    if (isExam && shouldLockCourseTimes && selectedCourse) {
+      dom.editEventStartTimeInput.value = selectedCourse.startTime;
+      dom.editEventEndTimeInput.value = selectedCourse.endTime;
+    }
+
+    if (!isExam && selectedDeadlinePreset) {
+      dom.editEventDueTimeInput.value = getDeadlinePresetTime(selectedDeadlinePreset, selectedCourse);
+    }
+
+    dom.editEventStartTimeInput.disabled = shouldLockCourseTimes;
+    dom.editEventEndTimeInput.disabled = shouldLockCourseTimes;
+    dom.editEventDueTimeInput.disabled = !isExam && Boolean(selectedDeadlinePreset);
 
     if (clearMessage) {
       setEditFormMessage("");
@@ -251,7 +341,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   }
 
   function validateComposerPresetDate({ clearInvalidDate = false } = {}) {
-    if (!dom.eventUseCourseTimingInput.checked) {
+    if (!composerNeedsCourseDayPresetValidation()) {
       return true;
     }
 
@@ -279,7 +369,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   }
 
   function validateEditPresetDate({ clearInvalidDate = false } = {}) {
-    if (!dom.editEventUseCourseTimingInput.checked) {
+    if (!editNeedsCourseDayPresetValidation()) {
       return true;
     }
 
@@ -362,6 +452,10 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       state.filters.type = "all";
     }
 
+    if (!STATUS_FILTERS.has(state.filters.status)) {
+      state.filters.status = DEFAULT_FILTERS.status;
+    }
+
     if (state.filters.course !== "all" && !getCourseNames().includes(state.filters.course)) {
       state.filters.course = "all";
     }
@@ -376,6 +470,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.eventNameInput.placeholder = copy.titlePlaceholder;
     dom.examTimeGroup.classList.toggle("is-hidden", !isExam);
     dom.deadlineTimeField.classList.toggle("is-hidden", isExam);
+    dom.eventDeadlinePresetGroup.classList.toggle("is-hidden", isExam);
     dom.eventStartTimeInput.required = isExam;
     dom.eventEndTimeInput.required = isExam;
     dom.eventDueTimeInput.required = !isExam;
@@ -391,6 +486,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.editEventNameInput.placeholder = copy.titlePlaceholder;
     dom.editExamTimeGroup.classList.toggle("is-hidden", !isExam);
     dom.editDeadlineTimeField.classList.toggle("is-hidden", isExam);
+    dom.editDeadlinePresetGroup.classList.toggle("is-hidden", isExam);
     dom.editEventStartTimeInput.required = isExam;
     dom.editEventEndTimeInput.required = isExam;
     dom.editEventDueTimeInput.required = !isExam;
@@ -418,6 +514,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.eventDateInput.value = formatDateValue(startOfToday());
     dom.eventCourseSelect.value = getCourseNames()[0] ?? "";
     dom.eventUseCourseTimingInput.checked = false;
+    setSelectedDeadlinePreset(dom.eventDeadlinePresetInputs, "");
     syncComposerUI();
     setFormMessage("");
   }
@@ -436,6 +533,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.editEventDateInput.value = formatDateValue(startOfToday());
     dom.editEventCourseSelect.value = getCourseNames()[0] ?? "";
     dom.editEventUseCourseTimingInput.checked = false;
+    setSelectedDeadlinePreset(dom.editDeadlinePresetInputs, "");
     syncEditUI();
     setEditFormMessage("");
   }
@@ -448,10 +546,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       startDate: DEFAULT_SEMESTER_START_DATE,
       endDate: DEFAULT_SEMESTER_END_DATE,
     };
-    state.filters = {
-      type: "all",
-      course: "all",
-    };
+    state.filters = { ...DEFAULT_FILTERS };
   }
 
   function resetDeleteAccountModalState() {
@@ -523,6 +618,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.editEventDateInput.value = eventRecord.date;
     dom.editEventCourseSelect.value = eventRecord.course;
     dom.editEventUseCourseTimingInput.checked = false;
+    setSelectedDeadlinePreset(dom.editDeadlinePresetInputs, "");
     dom.editEventNotesInput.value = eventRecord.notes ?? "";
     dom.editEventStartTimeInput.value = eventRecord.startTime ?? "";
     dom.editEventEndTimeInput.value = eventRecord.endTime ?? "";
@@ -595,14 +691,18 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     return state.user?.id ?? null;
   }
 
-  async function persistEvents() {
-    const userId = requireUserId();
-
+  async function persistEvents(eventsSnapshot = state.events, userId = requireUserId()) {
     if (!userId) {
       return;
     }
 
-    await scheduleRepository.saveEvents(userId, state.events);
+    await scheduleRepository.saveEvents(userId, eventsSnapshot);
+  }
+
+  function enqueueEventPersistence(eventsSnapshot, userId = requireUserId()) {
+    const persistTask = eventPersistenceQueue.catch(() => {}).then(() => persistEvents(eventsSnapshot, userId));
+    eventPersistenceQueue = persistTask.catch(() => {});
+    return persistTask;
   }
 
   async function persistCourses() {
@@ -1167,6 +1267,51 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     render();
   }
 
+  async function setEventCompletion(eventId, isCompleted) {
+    const userId = requireUserId();
+    const targetEvent = state.events.find((event) => event.id === eventId);
+
+    if (!userId || !targetEvent || targetEvent.type !== "deadline") {
+      return;
+    }
+
+    const previousEvent = targetEvent;
+    const completedAt = isCompleted ? new Date().toISOString() : "";
+    const updatedEvents = state.events.map((event) => {
+      if (event.id !== eventId) {
+        return event;
+      }
+
+      return normalizeEvent({
+        ...event,
+        status: isCompleted ? "completed" : "open",
+        completedAt,
+      });
+    });
+    const nextEvents = sortEvents(updatedEvents);
+
+    state.events = nextEvents;
+    render();
+
+    try {
+      await enqueueEventPersistence(nextEvents, userId);
+    } catch (error) {
+      console.error("Failed to update event completion", error);
+
+      const currentEvent = state.events.find((event) => event.id === eventId);
+      const isStillSameOptimisticUpdate =
+        currentEvent?.status === (isCompleted ? "completed" : "open") &&
+        (isCompleted ? currentEvent.completedAt === completedAt : !currentEvent.completedAt);
+
+      if (isStillSameOptimisticUpdate) {
+        state.events = sortEvents(
+          state.events.map((event) => (event.id === eventId ? previousEvent : event)),
+        );
+        render();
+      }
+    }
+  }
+
   async function deleteCourse(courseName) {
     state.courses = state.courses.filter((course) => !courseNameEquals(getCourseName(course), courseName));
     state.events = state.events.filter((event) => !courseNameEquals(event.course, courseName));
@@ -1188,10 +1333,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   async function clearUserScheduleData() {
     state.events = [];
     state.courses = [];
-    state.filters = {
-      type: "all",
-      course: "all",
-    };
+    state.filters = { ...DEFAULT_FILTERS };
     resetCourseFormEditor();
     resetEditForm();
     await persistCourses();
@@ -1203,14 +1345,12 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   function handleFilterChange() {
     state.filters.type = dom.typeFilterSelect.value;
     state.filters.course = dom.courseFilterSelect.value;
+    state.filters.status = dom.statusFilterSelect.value;
     render();
   }
 
   function clearFilters() {
-    state.filters = {
-      type: "all",
-      course: "all",
-    };
+    state.filters = { ...DEFAULT_FILTERS };
     render();
   }
 
@@ -1225,6 +1365,22 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       const eventId = editButton.dataset.editEventId;
       const eventToEdit = state.events.find((item) => item.id === eventId);
       openEdit(eventToEdit, editButton);
+      return;
+    }
+
+    const completeButton = event.target.closest("[data-complete-event-id]");
+
+    if (completeButton) {
+      const eventId = completeButton.dataset.completeEventId;
+      void setEventCompletion(eventId, true);
+      return;
+    }
+
+    const reopenButton = event.target.closest("[data-reopen-event-id]");
+
+    if (reopenButton) {
+      const eventId = reopenButton.dataset.reopenEventId;
+      void setEventCompletion(eventId, false);
       return;
     }
 
@@ -1470,10 +1626,16 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.eventDateInput.addEventListener("change", () => {
       validateComposerPresetDate({ clearInvalidDate: true });
     });
-    dom.eventUseCourseTimingInput.addEventListener("change", () => {
-      applyComposerCourseTimingPreset({ clearMessage: true });
-      validateComposerPresetDate({ clearInvalidDate: true });
-    });
+    dom.eventDeadlinePresetInputs.forEach((input) =>
+      input.addEventListener("change", () => {
+        if (getSelectedType() === "deadline") {
+          syncDeadlinePresetSelection(dom.eventDeadlinePresetInputs, input);
+        }
+
+        applyComposerCourseTimingPreset({ clearMessage: true });
+        validateComposerPresetDate({ clearInvalidDate: true });
+      }),
+    );
     dom.eventForm.addEventListener("submit", handleAddEvent);
     dom.openComposerButton.addEventListener("click", openComposer);
     dom.closeComposerButton.addEventListener("click", closeComposer);
@@ -1506,10 +1668,16 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.editEventDateInput.addEventListener("change", () => {
       validateEditPresetDate({ clearInvalidDate: true });
     });
-    dom.editEventUseCourseTimingInput.addEventListener("change", () => {
-      applyEditCourseTimingPreset({ clearMessage: true });
-      validateEditPresetDate({ clearInvalidDate: true });
-    });
+    dom.editDeadlinePresetInputs.forEach((input) =>
+      input.addEventListener("change", () => {
+        if (getSelectedEditType() === "deadline") {
+          syncDeadlinePresetSelection(dom.editDeadlinePresetInputs, input);
+        }
+
+        applyEditCourseTimingPreset({ clearMessage: true });
+        validateEditPresetDate({ clearInvalidDate: true });
+      }),
+    );
     dom.editEventForm.addEventListener("submit", handleEditEvent);
     dom.closeEditButton.addEventListener("click", closeEdit);
     syncEditUI();
@@ -1518,7 +1686,97 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   function initFilters() {
     dom.typeFilterSelect.addEventListener("change", handleFilterChange);
     dom.courseFilterSelect.addEventListener("change", handleFilterChange);
+    dom.statusFilterSelect.addEventListener("change", handleFilterChange);
     dom.clearFiltersButton.addEventListener("click", clearFilters);
+  }
+
+  function initSidebarToggle() {
+    if (!dom.sidebar || !dom.sidebarToggleButton) {
+      return;
+    }
+
+    function setSidebarOpen(isOpen) {
+      dom.sidebar.classList.toggle("is-open", isOpen);
+      dom.sidebarToggleButton.setAttribute("aria-expanded", String(isOpen));
+      dom.sidebarToggleButton.setAttribute("aria-label", isOpen ? "Close sidebar menu" : "Open sidebar menu");
+    }
+
+    setSidebarOpen(false);
+    dom.sidebarToggleButton.addEventListener("click", () => {
+      setSidebarOpen(!dom.sidebar.classList.contains("is-open"));
+    });
+  }
+
+  function initLegendTooltips() {
+    const tooltip = document.createElement("div");
+    let activeChip = null;
+
+    tooltip.className = "legend-tooltip";
+    tooltip.setAttribute("role", "tooltip");
+    document.body.append(tooltip);
+
+    function positionTooltip() {
+      if (!activeChip) {
+        return;
+      }
+
+      const chipRect = activeChip.getBoundingClientRect();
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const margin = 10;
+      const centeredLeft = chipRect.left + chipRect.width / 2 - tooltipRect.width / 2;
+      const rowTolerance = 4;
+      const chips = [...activeChip.parentElement.querySelectorAll(".legend-chip[data-tooltip]")];
+      const activeIndex = chips.indexOf(activeChip);
+      const isSameRow = (chip) => Math.abs(chip.getBoundingClientRect().top - chipRect.top) <= rowTolerance;
+      const hasPreviousChipInRow = chips.slice(0, activeIndex).some(isSameRow);
+      const hasNextChipInRow = chips.slice(activeIndex + 1).some(isSameRow);
+      let rowAwareLeft = centeredLeft;
+
+      if (!hasPreviousChipInRow) {
+        rowAwareLeft = chipRect.left;
+      } else if (!hasNextChipInRow) {
+        rowAwareLeft = chipRect.right - tooltipRect.width;
+      }
+
+      const viewportMin = margin;
+      const viewportMax = window.innerWidth - tooltipRect.width - margin;
+      const left = Math.min(Math.max(rowAwareLeft, viewportMin), viewportMax);
+      const belowTop = chipRect.bottom + 6;
+      const aboveTop = chipRect.top - tooltipRect.height - 6;
+      const maxTop = window.innerHeight - tooltipRect.height - margin;
+      const top = belowTop <= maxTop ? belowTop : Math.max(margin, aboveTop);
+
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${top}px`;
+    }
+
+    function showTooltip(chip) {
+      const tooltipText = chip.dataset.tooltip;
+
+      if (!tooltipText) {
+        return;
+      }
+
+      activeChip = chip;
+      tooltip.textContent = tooltipText;
+      tooltip.classList.add("is-visible");
+      positionTooltip();
+    }
+
+    function hideTooltip() {
+      activeChip = null;
+      tooltip.classList.remove("is-visible");
+    }
+
+    document.querySelectorAll(".legend-chip[data-tooltip]").forEach((chip) => {
+      chip.addEventListener("mouseenter", () => showTooltip(chip));
+      chip.addEventListener("focus", () => showTooltip(chip));
+      chip.addEventListener("mouseleave", hideTooltip);
+      chip.addEventListener("blur", hideTooltip);
+    });
+
+    window.addEventListener("resize", positionTooltip);
+    document.addEventListener("scroll", positionTooltip, { capture: true, passive: true });
   }
 
   function initAccountSettings() {
@@ -1598,6 +1856,8 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       initCourses();
       initEdit();
       initFilters();
+      initSidebarToggle();
+      initLegendTooltips();
       initAccountSettings();
       initDeleteAccount();
       initConfirm();

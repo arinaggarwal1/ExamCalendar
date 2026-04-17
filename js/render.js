@@ -10,6 +10,8 @@ import {
   getCountdownTone,
   getCourseName,
   groupEventsByDate,
+  isEventCompleted,
+  isEventOverdue,
   parseLocalDate,
   sortEvents,
   truncateText,
@@ -17,16 +19,43 @@ import {
 import { DEFAULT_SEMESTER_LABEL } from "./config.js";
 
 function hasActiveFilters(filters) {
-  return filters.type !== "all" || filters.course !== "all";
+  return filters.type !== "all" || filters.course !== "all" || filters.status !== "all";
 }
 
-function applyFilters(events, filters) {
+function applyTypeCourseFilters(events, filters) {
   return events.filter((event) => {
     const matchesType = filters.type === "all" || event.type === filters.type;
     const matchesCourse = filters.course === "all" || event.course === filters.course;
     return matchesType && matchesCourse;
   });
 }
+
+function matchesStatusFilter(event, statusFilter) {
+  if (statusFilter === "all") {
+    return true;
+  }
+
+  if (statusFilter === "completed") {
+    return isEventCompleted(event);
+  }
+
+  if (statusFilter === "overdue") {
+    return isEventOverdue(event);
+  }
+
+  return !isEventCompleted(event);
+}
+
+function applyFilters(events, filters) {
+  return applyTypeCourseFilters(events, filters).filter((event) =>
+    matchesStatusFilter(event, filters.status),
+  );
+}
+
+const completedAtFormatter = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+});
 
 function setShellMode(dom, mode) {
   dom.pageShell.classList.toggle("is-auth-view", mode === "auth");
@@ -97,10 +126,6 @@ function formatSemesterRange(startDate, endDate) {
 
 function renderSemesterRange(dom, startDate, endDate) {
   const rangeText = formatSemesterRange(startDate, endDate);
-
-  if (dom.sidebarSemesterRange) {
-    dom.sidebarSemesterRange.textContent = rangeText;
-  }
 
   if (dom.heroSemesterRange) {
     dom.heroSemesterRange.textContent = rangeText;
@@ -395,7 +420,7 @@ function renderCourseList(dom, courses, events) {
 }
 
 function renderNextEvent(dom, events) {
-  const upcoming = events.find(({ date }) => daysUntil(date) >= 0);
+  const upcoming = events.find((event) => daysUntil(event.date) >= 0 && !isEventOverdue(event));
 
   if (!upcoming) {
     dom.nextExamCard.innerHTML = `
@@ -426,94 +451,193 @@ function renderNextEvent(dom, events) {
   `;
 }
 
-function renderStats(dom, events, groupedEntries) {
-  const allDates = events.map(({ date }) => daysUntil(date));
-  const remainingDates = allDates.filter((days) => days >= 0);
-  const uniqueCourses = new Set(events.map(({ course }) => course));
-  const conflictDays = groupedEntries.filter(([, items]) => items.length > 1);
+function renderStats(dom, events) {
+  const activeEvents = events.filter((event) => !isEventCompleted(event));
+  const upcomingDates = activeEvents
+    .filter((event) => !isEventOverdue(event))
+    .map(({ date }) => daysUntil(date))
+    .filter((days) => days >= 0);
+  const conflictDays = [...groupEventsByDate(activeEvents).entries()].filter(([, items]) => items.length > 1);
+  const overdueCount = activeEvents.filter((event) => isEventOverdue(event)).length;
+  const deadlinesLeft = activeEvents.filter((event) => event.type === "deadline").length;
+  const examsLeft = activeEvents.filter((event) => event.type === "exam").length;
 
-  dom.totalEvents.textContent = String(events.length).padStart(2, "0");
-  dom.scheduleSpan.textContent = remainingDates.length
-    ? String(Math.max(...remainingDates)).padStart(2, "0")
+  dom.totalEvents.textContent = String(overdueCount).padStart(2, "0");
+  dom.scheduleSpan.textContent = upcomingDates.length
+    ? String(Math.max(...upcomingDates)).padStart(2, "0")
     : "00";
   dom.conflictCount.textContent = String(conflictDays.length).padStart(2, "0");
-  dom.courseCount.textContent = String(uniqueCourses.size).padStart(2, "0");
+  dom.deadlinesLeft.textContent = String(deadlinesLeft).padStart(2, "0");
+  dom.examsLeft.textContent = String(examsLeft).padStart(2, "0");
 }
 
-function renderTimeline(dom, groupedEntries, filters) {
-  if (!groupedEntries.length) {
+function getEmptyTimelineCopy(filters, scopedEventCount) {
+  if (filters.status !== "all" && scopedEventCount > 0) {
+    return {
+      kicker: "No Matches",
+      title: "No items match that status.",
+      body: "Switch the Show filter back to All items to review the full timeline.",
+    };
+  }
+
+  if (hasActiveFilters(filters)) {
+    return {
+      kicker: "No Matches",
+      title: "No items match these filters.",
+      body: "Try a different type, course, or status.",
+    };
+  }
+
+  return {
+    kicker: "No Events Yet",
+    title: "Add your first exam or deadline.",
+    body: "Use the Add item button to build your schedule.",
+  };
+}
+
+function renderEventStatusMeta(event) {
+  if (!isEventCompleted(event)) {
+    return "";
+  }
+
+  if (event.type === "exam") {
+    return '<span class="event-time">Auto-completed after exam end time</span>';
+  }
+
+  if (!event.completedAt) {
+    return "";
+  }
+
+  return `<span class="event-time">Completed ${completedAtFormatter.format(new Date(event.completedAt))}</span>`;
+}
+
+function renderEventItem(event) {
+  const isCompleted = isEventCompleted(event);
+  const isOverdue = isEventOverdue(event);
+  const statusBadge = isCompleted
+    ? '<span class="badge completed">Completed</span>'
+    : isOverdue
+      ? '<span class="badge overdue">Overdue</span>'
+      : "";
+  const completionAction =
+    event.type === "deadline"
+      ? isCompleted
+        ? `<button class="edit-button" type="button" data-reopen-event-id="${escapeHtml(event.id)}">Reopen</button>`
+        : `<button class="edit-button" type="button" data-complete-event-id="${escapeHtml(event.id)}">Mark done</button>`
+      : "";
+  const editLabel = isOverdue && !isCompleted ? "Reschedule" : "Edit";
+
+  return `
+    <article class="event-item ${isCompleted ? "is-completed" : ""} ${isOverdue ? "is-overdue" : ""}">
+      <div class="event-head">
+        <h3 class="course-name">${escapeHtml(event.course)}</h3>
+        <div class="event-actions">
+          <span class="badge ${event.type}">${event.type === "deadline" ? "Deadline" : "Exam"}</span>
+          ${statusBadge}
+          ${completionAction}
+          <button class="edit-button" type="button" data-edit-event-id="${escapeHtml(event.id)}">
+            ${editLabel}
+          </button>
+          <button class="delete-button" type="button" data-event-id="${escapeHtml(event.id)}">
+            Delete
+          </button>
+        </div>
+      </div>
+      <div class="event-meta">
+        <span class="event-name">${escapeHtml(event.event)}</span>
+        <span class="event-time-stack">
+          <span class="event-time">${escapeHtml(event.displayTime)}</span>
+          ${renderEventStatusMeta(event)}
+        </span>
+      </div>
+      ${
+        event.notes
+          ? `<div class="event-note"><span class="note-pill">${escapeHtml(event.notes)}</span></div>`
+          : ""
+      }
+    </article>
+  `;
+}
+
+function renderDayCard(date, events, index) {
+  const countdownDays = daysUntil(date);
+  const allCompleted = events.every((event) => isEventCompleted(event));
+  const allOverdue = events.every((event) => isEventOverdue(event));
+  const hasOverdue = events.some((event) => isEventOverdue(event));
+  const dayHasConflict = events.length > 1 && !allCompleted && !allOverdue;
+  const tone = allCompleted ? "completed" : allOverdue || hasOverdue ? "overdue" : getCountdownTone(date);
+  const countdownText = allCompleted
+    ? "Completed"
+    : hasOverdue && countdownDays >= 0
+      ? "Overdue"
+      : formatCountdown(countdownDays);
+  const dayLabel =
+    countdownDays === 0
+      ? "Today"
+      : countdownDays === 1
+        ? "Tomorrow"
+        : dateFormatter.format(parseLocalDate(date));
+
+  return `
+    <article class="exam-card ${tone} ${dayHasConflict ? "has-conflict" : ""}" style="animation-delay: ${
+      index * 70
+    }ms">
+      <div class="day-header">
+        <div class="exam-date-group">
+          <p class="exam-day">${dayLabel}</p>
+          <span class="exam-date-text">${fullDateFormatter.format(parseLocalDate(date))}</span>
+        </div>
+        <span class="day-countdown ${tone}">${countdownText}</span>
+      </div>
+
+      <div class="events-stack">
+        ${events.map((event) => renderEventItem(event)).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function renderTimelineSection(section, sectionIndex) {
+  if (!section.groupedEntries.length) {
+    return "";
+  }
+
+  const headingMarkup = section.title
+    ? `
+      <div class="timeline-section-header">
+        <p class="section-kicker">${escapeHtml(section.kicker)}</p>
+        <h3>${escapeHtml(section.title)}</h3>
+      </div>
+    `
+    : "";
+
+  return `
+    ${headingMarkup}
+    ${section.groupedEntries
+      .map(([date, events], index) => renderDayCard(date, events, index + sectionIndex * 10))
+      .join("")}
+  `;
+}
+
+function renderTimeline(dom, sections, filters, scopedEventCount) {
+  const hasVisibleEvents = sections.some((section) => section.groupedEntries.length);
+
+  if (!hasVisibleEvents) {
+    const emptyCopy = getEmptyTimelineCopy(filters, scopedEventCount);
     dom.examGrid.innerHTML = `
       <article class="exam-card">
         <div class="empty-board">
-          <p class="section-kicker">${hasActiveFilters(filters) ? "No Matches" : "No Events Yet"}</p>
-          <h3 class="empty-board-title">${
-            hasActiveFilters(filters) ? "No items match these filters." : "Add your first exam or deadline."
-          }</h3>
-          <p class="empty-board-text">${
-            hasActiveFilters(filters)
-              ? "Try a different type or course, or clear the filters."
-              : "Use the Add item button to build your schedule."
-          }</p>
+          <p class="section-kicker">${emptyCopy.kicker}</p>
+          <h3 class="empty-board-title">${emptyCopy.title}</h3>
+          <p class="empty-board-text">${emptyCopy.body}</p>
         </div>
       </article>
     `;
     return;
   }
 
-  dom.examGrid.innerHTML = groupedEntries
-    .map(([date, events], index) => {
-      const countdownDays = daysUntil(date);
-      const countdownText = formatCountdown(countdownDays);
-      const dayHasConflict = events.length > 1;
-      const tone = getCountdownTone(countdownDays, dayHasConflict);
-      const dayLabel = dateFormatter.format(parseLocalDate(date));
-
-      return `
-        <article class="exam-card ${tone} ${dayHasConflict ? "has-conflict" : ""}" style="animation-delay: ${
-          index * 70
-        }ms">
-          <div class="day-header">
-            <div class="exam-date-group">
-              <p class="exam-day">${dayLabel}</p>
-              <span class="exam-date-text">${fullDateFormatter.format(parseLocalDate(date))}</span>
-            </div>
-            <span class="day-countdown ${tone}">${countdownText}</span>
-          </div>
-
-          <div class="events-stack">
-            ${events
-              .map(
-                (event) => `
-                  <article class="event-item">
-                    <div class="event-head">
-                      <h3 class="course-name">${escapeHtml(event.course)}</h3>
-                      <div class="event-actions">
-                        <span class="badge ${event.type}">${event.type === "deadline" ? "Deadline" : "Exam"}</span>
-                        <button class="edit-button" type="button" data-edit-event-id="${escapeHtml(event.id)}">
-                          Edit
-                        </button>
-                        <button class="delete-button" type="button" data-event-id="${escapeHtml(event.id)}">
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                    <div class="event-meta">
-                      <span class="event-name">${escapeHtml(event.event)}</span>
-                      <span class="event-time">${escapeHtml(event.displayTime)}</span>
-                    </div>
-                    ${
-                      event.notes
-                        ? `<div class="event-note"><span class="note-pill">${escapeHtml(event.notes)}</span></div>`
-                        : ""
-                    }
-                  </article>
-                `,
-              )
-              .join("")}
-          </div>
-        </article>
-      `;
-    })
+  dom.examGrid.innerHTML = sections
+    .map((section, sectionIndex) => renderTimelineSection(section, sectionIndex))
     .join("");
 }
 
@@ -522,8 +646,10 @@ function disableAuthenticatedControls(dom) {
   renderCourseList(dom, [], []);
   renderCourseFilterSelect(dom, [], "all");
   dom.typeFilterSelect.value = "all";
+  dom.statusFilterSelect.value = "all";
   dom.typeFilterSelect.disabled = true;
   dom.courseFilterSelect.disabled = true;
+  dom.statusFilterSelect.disabled = true;
   dom.clearFiltersButton.disabled = true;
   if (dom.editEventCourseSelect) {
     dom.editEventCourseSelect.disabled = true;
@@ -543,7 +669,8 @@ function renderWorkspaceMessage(dom, options) {
   dom.totalEvents.textContent = "00";
   dom.scheduleSpan.textContent = "00";
   dom.conflictCount.textContent = "00";
-  dom.courseCount.textContent = "00";
+  dom.deadlinesLeft.textContent = "00";
+  dom.examsLeft.textContent = "00";
 
   dom.examGrid.innerHTML = `
     <article class="exam-card">
@@ -625,19 +752,35 @@ export function renderApp({ dom, state }) {
   }
 
   const sortedEvents = sortEvents(state.events);
+  const scopedEvents = applyTypeCourseFilters(sortedEvents, state.filters);
   const filteredEvents = applyFilters(sortedEvents, state.filters);
-  const groupedEntries = [...groupEventsByDate(filteredEvents).entries()];
+  const overdueEvents = filteredEvents.filter((event) => isEventOverdue(event));
+  const timelineEvents = filteredEvents.filter((event) => !isEventOverdue(event));
+  const timelineSections = [
+    {
+      kicker: "Needs Attention",
+      title: "Overdue items",
+      groupedEntries: [...groupEventsByDate(overdueEvents).entries()],
+    },
+    {
+      kicker: "Timeline",
+      title: overdueEvents.length ? "Schedule" : "",
+      groupedEntries: [...groupEventsByDate(timelineEvents).entries()],
+    },
+  ];
 
-  renderNextEvent(dom, filteredEvents);
-  renderStats(dom, filteredEvents, groupedEntries);
-  renderTimeline(dom, groupedEntries, state.filters);
+  renderNextEvent(dom, scopedEvents.filter((event) => !isEventCompleted(event)));
+  renderStats(dom, scopedEvents);
+  renderTimeline(dom, timelineSections, state.filters, scopedEvents.length);
   renderCourseSelect(dom, state.courses);
   renderCourseList(dom, state.courses, state.events);
   renderCourseFilterSelect(dom, state.courses, state.filters.course);
 
   dom.typeFilterSelect.value = state.filters.type;
+  dom.statusFilterSelect.value = state.filters.status;
   dom.typeFilterSelect.disabled = false;
   dom.courseFilterSelect.disabled = false;
+  dom.statusFilterSelect.disabled = false;
   dom.clearFiltersButton.disabled = !hasActiveFilters(state.filters);
   dom.openComposerButton.disabled = false;
   dom.openCoursesButton.disabled = false;
