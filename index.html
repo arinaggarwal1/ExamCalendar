@@ -6,13 +6,18 @@
     <title>Exam Calendar</title>
     <link rel="icon" type="image/png" href="./icon.png?v=1" />
     <link rel="apple-touch-icon" href="./icon.png?v=1" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#eaf3ff" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Exam Calendar" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=46" />
+    <link rel="stylesheet" href="./styles.css?v=47" />
   </head>
   <body>
     <div class="page-shell">
@@ -44,6 +49,7 @@
           <div id="sidebarContent" class="sidebar-collapsible">
             <div class="sidebar-actions">
               <button id="openComposerButton" class="primary-button side-button" type="button">Add Item</button>
+              <a class="ghost-button side-button side-link" href="./calendar.html">Calendar View</a>
               <button id="openCoursesButton" class="ghost-button side-button" type="button">Manage Courses</button>
             </div>
 
@@ -273,6 +279,21 @@
                 <span>Notes</span>
                 <textarea id="eventNotes" name="notes" rows="3" placeholder="Optional details"></textarea>
               </label>
+
+              <section class="reminder-panel field-wide" aria-labelledby="eventReminderHeading">
+                <div>
+                  <span id="eventReminderHeading" class="field-label">Reminder</span>
+                  <p class="modal-text">Use your account default, or override it for this item.</p>
+                </div>
+                <label class="field field-wide">
+                  <span>Reminder mode</span>
+                  <select id="eventReminderMode" name="reminder_mode">
+                    <option value="use-default">Use account default</option>
+                    <option value="off">Off</option>
+                    <option value="selected-times">At selected times</option>
+                  </select>
+                </label>
+              </section>
             </div>
 
             <div class="form-actions">
@@ -451,6 +472,21 @@
                 <span>Notes</span>
                 <textarea id="editEventNotes" name="notes" rows="3" placeholder="Optional details"></textarea>
               </label>
+
+              <section class="reminder-panel field-wide" aria-labelledby="editEventReminderHeading">
+                <div>
+                  <span id="editEventReminderHeading" class="field-label">Reminder</span>
+                  <p class="modal-text">Use your account default, or override it for this item.</p>
+                </div>
+                <label class="field field-wide">
+                  <span>Reminder mode</span>
+                  <select id="editEventReminderMode" name="edit_reminder_mode">
+                    <option value="use-default">Use account default</option>
+                    <option value="off">Off</option>
+                    <option value="selected-times">At selected times</option>
+                  </select>
+                </label>
+              </section>
             </div>
 
             <div class="form-actions">
@@ -518,6 +554,78 @@
                 <input id="semesterEndDateInput" name="semester_end_date" type="date" />
               </label>
             </div>
+
+            <section class="ntfy-guide field-wide" aria-labelledby="ntfySettingsHeading" hidden aria-hidden="true">
+              <div class="ntfy-guide-head">
+                <div>
+                  <p class="section-kicker">Notifications</p>
+                  <h3 id="ntfySettingsHeading">Set up ntfy reminders</h3>
+                  <p class="modal-text">Install ntfy, subscribe to your private topic, then send yourself a test.</p>
+                </div>
+                <label class="ntfy-enable-toggle">
+                  <input id="ntfyEnabledInput" name="ntfy_enabled" type="checkbox" />
+                  <span>Enable</span>
+                </label>
+              </div>
+
+              <ol class="setup-steps">
+                <li>Install the ntfy app on your phone.</li>
+                <li>Subscribe to the topic below in the ntfy app.</li>
+                <li>Send a test notification and keep ntfy notifications enabled.</li>
+              </ol>
+
+              <label class="field field-wide">
+                <span>Private ntfy topic</span>
+                <div class="copy-field">
+                  <input id="ntfyTopicInput" name="ntfy_topic" type="text" readonly spellcheck="false" />
+                  <button id="copyNtfyTopicButton" class="ghost-button" type="button">Copy</button>
+                </div>
+              </label>
+
+              <div class="field-group-inline field-wide">
+                <label class="field">
+                  <span>Exam default</span>
+                  <select id="ntfyExamModeSelect" name="ntfy_exam_mode">
+                    <option value="off">Off</option>
+                    <option value="selected-times">At selected times</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Deadline default</span>
+                  <select id="ntfyDeadlineModeSelect" name="ntfy_deadline_mode">
+                    <option value="off">Off</option>
+                    <option value="selected-times">At selected times</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="reminder-time-grid field-wide" role="group" aria-label="Default notification timing">
+                <label class="lock-time-toggle">
+                  <input type="checkbox" name="ntfy_time" value="1440" />
+                  <span>Day before</span>
+                </label>
+                <label class="lock-time-toggle">
+                  <input type="checkbox" name="ntfy_time" value="180" />
+                  <span>3 hours before</span>
+                </label>
+                <label class="lock-time-toggle">
+                  <input type="checkbox" name="ntfy_time" value="60" />
+                  <span>1 hour before</span>
+                </label>
+                <label class="lock-time-toggle">
+                  <input type="checkbox" name="ntfy_time" value="15" />
+                  <span>15 minutes before</span>
+                </label>
+              </div>
+
+              <div class="ntfy-guide-actions">
+                <button id="testNtfyButton" class="ghost-button" type="button">Send Test</button>
+                <button id="regenerateNtfyTopicButton" class="ghost-button" type="button">Regenerate Topic</button>
+                <button id="manualNtfyScheduleButton" class="ghost-button" type="button">Schedule All Now</button>
+                <button id="viewScheduledNtfyButton" class="ghost-button" type="button">View Scheduled</button>
+              </div>
+              <div id="ntfyScheduledResults" class="ntfy-scheduled-results" aria-live="polite"></div>
+            </section>
             <div class="form-actions">
               <button id="saveAccountSettingsButton" type="submit" class="primary-button">Save settings</button>
               <p id="accountSettingsMessage" class="form-message" aria-live="polite"></p>
@@ -577,6 +685,6 @@
       </section>
     </div>
 
-    <script type="module" src="./script.js?v=33"></script>
+    <script type="module" src="./script.js?v=38"></script>
   </body>
 </html>

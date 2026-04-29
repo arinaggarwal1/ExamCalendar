@@ -17,6 +17,29 @@ export const MS_PER_DAY = 1000 * 60 * 60 * 24;
 export const DEFAULT_SEMESTER_LABEL = "Spring 2026";
 export const DEFAULT_SEMESTER_START_DATE = "";
 export const DEFAULT_SEMESTER_END_DATE = "";
+export const DEFAULT_NTFY_SERVER_URL = "https://ntfy.sh";
+export const NTFY_SCHEDULE_WINDOW_DAYS = 3;
+export const REMINDER_TIME_OPTIONS = [
+  { value: 1440, label: "Day before" },
+  { value: 180, label: "3 hours before" },
+  { value: 60, label: "1 hour before" },
+  { value: 15, label: "15 minutes before" },
+];
+export const REMINDER_MODE_LABELS = {
+  "use-default": "Use default",
+  off: "Off",
+  "selected-times": "At selected times",
+  "until-ack": "At selected times",
+};
+export const DEFAULT_NTFY_SETTINGS = {
+  enabled: false,
+  serverUrl: DEFAULT_NTFY_SERVER_URL,
+  topic: "",
+  defaultExamMode: "selected-times",
+  defaultDeadlineMode: "selected-times",
+  defaultTimes: [1440, 180, 60],
+  repeatMinutes: 15,
+};
 export const SAME_DAY_NOTE = "Multiple events on same day";
 export const LEGACY_SAME_DAY_NOTES = new Set([
   "Same day as another exam",

@@ -2,6 +2,8 @@ import {
   DEFAULT_SEMESTER_END_DATE,
   DEFAULT_SEMESTER_LABEL,
   DEFAULT_SEMESTER_START_DATE,
+  NTFY_SCHEDULE_WINDOW_DAYS,
+  REMINDER_TIME_OPTIONS,
   TYPE_COPY,
 } from "./config.js";
 import { renderApp } from "./render.js";
@@ -11,13 +13,18 @@ import {
   courseHasClassSchedule,
   courseNameEquals,
   formatDateValue,
+  generateNtfyTopic,
   getCourseByName,
   getCourseName,
+  getEventDueAt,
   isDateOnCourseDay,
+  isEventCompleted,
   isValidEvent,
   normalizeClockTime,
   normalizeCourse,
   normalizeEvent,
+  normalizeNtfySettings,
+  parseLocalDate,
   sortCourses,
   sortEvents,
   startOfToday,
@@ -54,6 +61,20 @@ const DEFAULT_FILTERS = {
 };
 
 const STATUS_FILTERS = new Set(["all", "open", "overdue", "completed"]);
+const ALL_REMINDER_TIMES = REMINDER_TIME_OPTIONS.map(({ value }) => value);
+const NTFY_RECONCILE_THROTTLE_MS = 6 * 60 * 60 * 1000;
+const NTFY_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const NTFY_REQUEST_MAX_RETRIES = 2;
+const NTFY_REQUEST_BACKOFF_MS = 1000;
+const NTFY_RECONCILE_CONCURRENCY = 1;
+const NTFY_REQUEST_SPACING_MS = 5200;
+const NTFY_MIN_FUTURE_MS = 30 * 1000;
+const NTFY_DEBUG_QUERY_PARAM = "ntfyDebug";
+const NTFY_RATE_LIMIT_DEFAULT_MS = 5 * 60 * 1000;
+const NTFY_RATE_LIMIT_MIN_MS = 60 * 1000;
+const NTFY_VIEW_CACHE_MS = 30 * 1000;
+const NTFY_VIEW_TIMEOUT_MS = 10000;
+const ACTIVE_REMINDER_PROVIDER = "pwa";
 
 export function createAppController({ dom, sessionService, scheduleRepository }) {
   const state = {
@@ -69,6 +90,10 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       startDate: DEFAULT_SEMESTER_START_DATE,
       endDate: DEFAULT_SEMESTER_END_DATE,
     },
+    ntfySettings: normalizeNtfySettings({
+      enabled: true,
+      topic: generateNtfyTopic(),
+    }),
     filters: { ...DEFAULT_FILTERS },
     setup: createDefaultSetupState(),
   };
@@ -79,7 +104,18 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   let editingEventId = null;
   let editingCourseOriginalName = null;
   let isDeletingAccount = false;
+  let isAddingEvent = false;
+  let isEditingEvent = false;
   let eventPersistenceQueue = Promise.resolve();
+  let persistedNtfySettings = normalizeNtfySettings(state.ntfySettings);
+  let lastNtfyReconcileAt = 0;
+  let ntfyRateLimitedUntil = 0;
+  let ntfyScheduledViewCache = null;
+  let ntfyOperationQueue = Promise.resolve();
+  let ntfyTraceCounter = 0;
+  let ntfyScheduleRevision = 0;
+  let browserReminderTimers = new Map();
+  const ntfyDebugEnabled = isNtfyDebugEnabled();
 
   function getSelectedType() {
     const selectedInput = dom.eventTypeInputs.find((input) => input.checked);
@@ -164,6 +200,1420 @@ export function createAppController({ dom, sessionService, scheduleRepository })
 
   function getCourseNames() {
     return state.courses.map((course) => getCourseName(course)).filter(Boolean);
+  }
+
+  function getSelectedReminderTimes(inputs) {
+    const selectedTimes = inputs.filter((input) => input.checked).map((input) => Number(input.value));
+    return selectedTimes.length ? selectedTimes : [1440, 180, 60];
+  }
+
+  function syncReminderTimeInputs(inputs, selectedTimes = []) {
+    inputs.forEach((input) => {
+      input.checked = selectedTimes.includes(Number(input.value));
+    });
+  }
+
+  function setNtfyMessage(message, tone = "success") {
+    setAccountSettingsMessage(message, tone);
+  }
+
+  function isNtfyReminderProviderActive() {
+    return ACTIVE_REMINDER_PROVIDER === "ntfy";
+  }
+
+  function isBrowserReminderProviderActive() {
+    return ACTIVE_REMINDER_PROVIDER === "pwa";
+  }
+
+  function isBrowserNotificationSupported() {
+    return typeof window !== "undefined" && "Notification" in window;
+  }
+
+  function getBrowserReminderSettings() {
+    const normalizedSettings = normalizeNtfySettings(state.ntfySettings);
+    return {
+      ...normalizedSettings,
+      enabled: true,
+      topic: normalizedSettings.topic || "browser-local",
+    };
+  }
+
+  async function requestBrowserNotificationPermission() {
+    if (!isBrowserReminderProviderActive() || !isBrowserNotificationSupported()) {
+      return false;
+    }
+
+    if (Notification.permission === "granted") {
+      return true;
+    }
+
+    if (Notification.permission === "denied") {
+      return false;
+    }
+
+    try {
+      return (await Notification.requestPermission()) === "granted";
+    } catch (error) {
+      console.warn("Could not request browser notification permission", error);
+      return false;
+    }
+  }
+
+  function enqueueNtfyOperation(label, operation) {
+    if (!isNtfyReminderProviderActive()) {
+      emitNtfyDebugLog("operation_skipped_inactive_provider", { label });
+      return Promise.resolve({ scheduled: 0, failed: 0 });
+    }
+
+    const queuedOperation = ntfyOperationQueue.catch(() => {}).then(async () => {
+      emitNtfyDebugLog("operation_start", { label });
+
+      try {
+        const result = await operation();
+        emitNtfyDebugLog("operation_done", { label });
+        return result;
+      } catch (error) {
+        emitNtfyDebugLog("operation_error", {
+          label,
+          message: error?.message || "unknown error",
+        });
+        throw error;
+      }
+    });
+
+    ntfyOperationQueue = queuedOperation.catch(() => {});
+    return queuedOperation;
+  }
+
+  function markNtfyScheduleChanged(reason) {
+    ntfyScheduleRevision += 1;
+    emitNtfyDebugLog("schedule_revision_changed", {
+      reason,
+      revision: String(ntfyScheduleRevision),
+    });
+    return ntfyScheduleRevision;
+  }
+
+  function isNtfyScheduleRevisionCurrent(expectedRevision) {
+    return !Number.isFinite(expectedRevision) || expectedRevision === ntfyScheduleRevision;
+  }
+
+  function formatUnixTimestamp(seconds) {
+    const value = Number(seconds);
+
+    if (!Number.isFinite(value) || value <= 0) {
+      return "";
+    }
+
+    return new Date(value * 1000).toLocaleString();
+  }
+
+  function getRateLimitRemainingMs() {
+    return Math.max(0, ntfyRateLimitedUntil - Date.now());
+  }
+
+  function nextNtfyTraceId(prefix = "trace") {
+    ntfyTraceCounter += 1;
+    return `${prefix}-${Date.now()}-${ntfyTraceCounter}`;
+  }
+
+  function formatRateLimitResumeTime() {
+    if (!ntfyRateLimitedUntil) {
+      return "";
+    }
+
+    return new Date(ntfyRateLimitedUntil).toLocaleTimeString();
+  }
+
+  function escapeNtfyDisplay(value = "") {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function getNtfyEntrySequenceId(entry) {
+    return typeof entry?.sequence_id === "string" && entry.sequence_id
+      ? entry.sequence_id
+      : typeof entry?.id === "string"
+        ? entry.id
+        : "";
+  }
+
+  function getNtfyEntryTimeMs(entry) {
+    const seconds = Number(entry?.time);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+  }
+
+  function getFutureNtfyEntries(entries = [], now = new Date()) {
+    const nowMs = now.getTime();
+    return entries.filter((entry) => entry?.event === "message" && getNtfyEntryTimeMs(entry) > nowMs);
+  }
+
+  function dedupeNtfyEntriesBySequence(entries = []) {
+    const bySequence = new Map();
+    let duplicateCount = 0;
+
+    for (const entry of entries) {
+      const sequenceId = getNtfyEntrySequenceId(entry);
+      const key = sequenceId || `${entry?.id || "unknown"}-${entry?.time || ""}-${entry?.message || ""}`;
+      const existing = bySequence.get(key);
+
+      if (!existing) {
+        bySequence.set(key, entry);
+        continue;
+      }
+
+      duplicateCount += 1;
+      if (getNtfyEntryTimeMs(entry) >= getNtfyEntryTimeMs(existing)) {
+        bySequence.set(key, entry);
+      }
+    }
+
+    return {
+      entries: [...bySequence.values()].sort((a, b) => getNtfyEntryTimeMs(a) - getNtfyEntryTimeMs(b)),
+      duplicateCount,
+    };
+  }
+
+  function getExpectedScheduledNtfyEntries(eventsSnapshot = state.events, ntfySettings = state.ntfySettings) {
+    const normalizedSettings = normalizeNtfySettings(ntfySettings);
+    const now = new Date();
+
+    return eventsSnapshot
+      .filter((eventRecord) => !isEventCompleted(eventRecord) && getEventDueAt(eventRecord).getTime() > now.getTime())
+      .flatMap((eventRecord) =>
+        getSchedulableReminderStages(eventRecord, normalizedSettings, now).map((stage) => ({
+          eventId: eventRecord.id,
+          sequenceId: getNtfySequenceId(eventRecord, stage.minutesBefore),
+          title: eventRecord.event,
+          course: eventRecord.course,
+          sendAt: stage.sendAt,
+          minutesBefore: stage.minutesBefore,
+        })),
+      );
+  }
+
+  function renderScheduledNtfyComparison(entries = [], sourceUrl = "", meta = {}) {
+    const actualIds = new Set(entries.map((entry) => getNtfyEntrySequenceId(entry)).filter(Boolean));
+    const expectedEntries = getExpectedScheduledNtfyEntries();
+    const missingEntries = expectedEntries.filter((entry) => !actualIds.has(entry.sequenceId));
+    const actualRows = entries
+      .map((entry) => {
+        const title = typeof entry.title === "string" && entry.title.trim() ? entry.title.trim() : "Reminder";
+        const message = typeof entry.message === "string" && entry.message.trim() ? entry.message.trim() : "(No body)";
+        const scheduledTime = formatUnixTimestamp(entry.time) || "Unknown time";
+        const id = getNtfyEntrySequenceId(entry);
+
+        return `
+          <article class="ntfy-scheduled-item">
+            <p class="ntfy-scheduled-item-title">${escapeNtfyDisplay(title)}</p>
+            <p class="ntfy-scheduled-item-meta">${escapeNtfyDisplay(scheduledTime)}${id ? ` · ${escapeNtfyDisplay(id)}` : ""}</p>
+            <p class="ntfy-scheduled-item-body">${escapeNtfyDisplay(message)}</p>
+          </article>
+        `;
+      })
+      .join("");
+    const missingRows = missingEntries
+      .map((entry) => `
+        <article class="ntfy-scheduled-item is-missing">
+          <p class="ntfy-scheduled-item-title">${escapeNtfyDisplay(`${entry.course} ${entry.title}`.trim())}</p>
+          <p class="ntfy-scheduled-item-meta">${escapeNtfyDisplay(entry.sendAt.toLocaleString())} · ${entry.minutesBefore} min before · ${escapeNtfyDisplay(entry.sequenceId)}</p>
+          <p class="ntfy-scheduled-item-body">Expected locally, not currently returned by ntfy scheduled view.</p>
+        </article>
+      `)
+      .join("");
+    const hiddenBits = [];
+
+    if (meta.hiddenCachedCount) {
+      hiddenBits.push(`${meta.hiddenCachedCount} past cached row${meta.hiddenCachedCount === 1 ? "" : "s"} hidden`);
+    }
+
+    if (meta.duplicateCount) {
+      hiddenBits.push(`${meta.duplicateCount} duplicate future row${meta.duplicateCount === 1 ? "" : "s"} collapsed`);
+    }
+
+    const hiddenSummary = hiddenBits.length
+      ? `<p class="modal-text">${escapeNtfyDisplay(hiddenBits.join(" · "))}</p>`
+      : "";
+
+    dom.ntfyScheduledResults.innerHTML = `
+      <div class="ntfy-scheduled-head">
+        <p class="modal-text">ntfy: ${entries.length} scheduled · expected: ${expectedEntries.length} · missing: ${missingEntries.length}</p>
+        <p class="modal-text">${escapeNtfyDisplay(sourceUrl)}</p>
+        ${hiddenSummary}
+      </div>
+      ${actualRows ? `<div class="ntfy-scheduled-list">${actualRows}</div>` : `<p class="modal-text">No scheduled reminders found in ntfy.</p>`}
+      ${missingRows ? `<div class="ntfy-scheduled-list ntfy-missing-list">${missingRows}</div>` : ""}
+    `;
+  }
+
+  function parseScheduledNtfyPayload(payload = "") {
+    const text = typeof payload === "string" ? payload.trim() : "";
+
+    if (!text) {
+      return [];
+    }
+
+    if (text.startsWith("{") || text.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+
+        if (parsed && typeof parsed === "object") {
+          return [parsed];
+        }
+      } catch {
+        // Fall through to line-delimited parsing.
+      }
+    }
+
+    return text
+      .split("\n")
+      .map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return null;
+        }
+
+        try {
+          return JSON.parse(trimmed);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  }
+
+  async function fetchScheduledNtfyEntries(ntfySettings = state.ntfySettings) {
+    const normalizedSettings = normalizeNtfySettings(ntfySettings);
+    const traceId = nextNtfyTraceId("view");
+
+    if (!normalizedSettings.topic) {
+      throw new Error("Notification setup is not ready yet.");
+    }
+
+    if (
+      ntfyScheduledViewCache &&
+      ntfyScheduledViewCache.topic === normalizedSettings.topic &&
+      Date.now() - ntfyScheduledViewCache.fetchedAt < NTFY_VIEW_CACHE_MS
+    ) {
+      emitNtfyDebugLog("view_scheduled_cache_hit", {
+        traceId,
+        topic: normalizedSettings.topic,
+      });
+      return ntfyScheduledViewCache.data;
+    }
+
+    const sinceSeconds = Math.floor(Date.now() / 1000);
+    const endpoint = `${normalizedSettings.serverUrl}/${encodeURIComponent(
+      normalizedSettings.topic,
+    )}/json?poll=1&sched=1&since=${sinceSeconds}`;
+    emitNtfyDebugLog("view_scheduled_start", {
+      traceId,
+      topic: normalizedSettings.topic,
+      endpoint,
+    });
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      controller.abort("scheduled reminder view timed out");
+    }, NTFY_VIEW_TIMEOUT_MS);
+
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        emitNtfyDebugLog("view_scheduled_timeout", {
+          traceId,
+          endpoint,
+          timeoutMs: String(NTFY_VIEW_TIMEOUT_MS),
+        });
+        throw new Error("Timed out loading scheduled reminders. Try again.");
+      }
+      emitNtfyDebugLog("view_scheduled_network_error", {
+        traceId,
+        endpoint,
+        message: error?.message || "network error",
+      });
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      if (response.status === 429) {
+        applyRateLimitCooldown(response);
+      }
+      const body = (await response.text()).trim();
+      emitNtfyDebugLog("view_scheduled_fail", {
+        traceId,
+        endpoint,
+        status: String(response.status),
+      });
+      throw new Error(`Could not load scheduled reminders (${response.status})${body ? `: ${body.slice(0, 160)}` : ""}`);
+    }
+
+    const payload = await response.text();
+    const allMessageEntries = parseScheduledNtfyPayload(payload).filter((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return false;
+      }
+
+      return entry.event === "message";
+    });
+    const futureEntries = getFutureNtfyEntries(allMessageEntries);
+    const { entries, duplicateCount } = dedupeNtfyEntriesBySequence(futureEntries);
+    const hiddenCachedCount = Math.max(0, allMessageEntries.length - futureEntries.length);
+
+    const data = {
+      endpoint,
+      entries,
+      duplicateCount,
+      hiddenCachedCount,
+      rawCount: allMessageEntries.length,
+    };
+    ntfyScheduledViewCache = {
+      topic: normalizedSettings.topic,
+      fetchedAt: Date.now(),
+      data,
+    };
+    emitNtfyDebugLog("view_scheduled_done", {
+      traceId,
+      endpoint,
+      entries: String(entries.length),
+      hiddenCachedCount: String(hiddenCachedCount),
+      duplicateCount: String(duplicateCount),
+    });
+
+    return data;
+  }
+
+  async function handleViewScheduledNtfy() {
+    state.ntfySettings = readAccountNtfySettings();
+    if (getRateLimitRemainingMs() > 0) {
+      emitNtfyDebugLog("view_scheduled_blocked_rate_limit", {
+        retryAt: formatRateLimitResumeTime(),
+      });
+      setAccountSettingsMessage(`Rate limited by reminders. Try again after ${formatRateLimitResumeTime()}.`, "warning");
+      return;
+    }
+
+    dom.viewScheduledNtfyButton.disabled = true;
+    dom.ntfyScheduledResults.innerHTML = `<p class="modal-text">Loading scheduled reminders...</p>`;
+
+    try {
+      const { endpoint, entries, duplicateCount, hiddenCachedCount } = await fetchScheduledNtfyEntries(state.ntfySettings);
+      renderScheduledNtfyComparison(entries, endpoint, {
+        duplicateCount,
+        hiddenCachedCount,
+      });
+      setAccountSettingsMessage(
+        entries.length
+          ? `Loaded ${entries.length} future scheduled reminder${entries.length === 1 ? "" : "s"}.`
+          : "No future scheduled reminders found.",
+      );
+    } catch (error) {
+      console.error("Failed to load scheduled reminders", error);
+      dom.ntfyScheduledResults.innerHTML = `<p class="modal-text">Could not load scheduled reminders.</p>`;
+      const rateLimitRemaining = getRateLimitRemainingMs();
+
+      if (rateLimitRemaining > 0) {
+        setAccountSettingsMessage(
+          `Rate limited by reminders. Try again after ${formatRateLimitResumeTime()}.`,
+          "warning",
+        );
+      } else {
+        setAccountSettingsMessage(error?.message || "Could not load scheduled reminders.", "warning");
+      }
+    } finally {
+      dom.viewScheduledNtfyButton.disabled = false;
+    }
+  }
+
+  function buildNtfySettings(overrides = {}) {
+    return normalizeNtfySettings({
+      ...state.ntfySettings,
+      ...overrides,
+    });
+  }
+
+  function readAccountNtfySettings() {
+    return buildNtfySettings({
+      enabled: dom.ntfyEnabledInput.checked,
+      topic: dom.ntfyTopicInput.value,
+      defaultExamMode: dom.ntfyExamModeSelect.value,
+      defaultDeadlineMode: dom.ntfyDeadlineModeSelect.value,
+      defaultTimes: getSelectedReminderTimes(dom.ntfyTimeInputs),
+    });
+  }
+
+  function getSetupNtfyElements() {
+    return {
+      enabledInput: dom.authScreen.querySelector("#setupNtfyEnabledInput"),
+      topicInput: dom.authScreen.querySelector("#setupNtfyTopicInput"),
+      examModeSelect: dom.authScreen.querySelector("#setupNtfyExamModeSelect"),
+      deadlineModeSelect: dom.authScreen.querySelector("#setupNtfyDeadlineModeSelect"),
+      timeInputs: [...dom.authScreen.querySelectorAll('input[name="setup_ntfy_time"]')],
+    };
+  }
+
+  function readSetupNtfySettings() {
+    const elements = getSetupNtfyElements();
+
+    return buildNtfySettings({
+      enabled: elements.enabledInput ? elements.enabledInput.checked : true,
+      topic: elements.topicInput?.value || state.ntfySettings.topic,
+      defaultExamMode: elements.examModeSelect?.value || state.ntfySettings.defaultExamMode,
+      defaultDeadlineMode: elements.deadlineModeSelect?.value || state.ntfySettings.defaultDeadlineMode,
+      defaultTimes: getSelectedReminderTimes(elements.timeInputs),
+    });
+  }
+
+  async function copyText(value) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+
+    return false;
+  }
+
+  async function copyNtfyTopic(topicInput, setMessage = setNtfyMessage) {
+    const topic = topicInput?.value || state.ntfySettings.topic;
+
+    if (!topic) {
+      setMessage("Notification setup is not ready yet.", "warning");
+      return;
+    }
+
+    try {
+      const copied = await copyText(topic);
+
+      if (!copied) {
+        throw new Error("Clipboard API is unavailable.");
+      }
+
+      setMessage("Notification topic copied.");
+    } catch (error) {
+      console.error("Failed to copy ntfy topic", error);
+      if (topicInput) {
+        topicInput.focus();
+        topicInput.select();
+      }
+      setMessage("Select and copy the topic manually.", "warning");
+    }
+  }
+
+  async function sendNtfyTest(settings = state.ntfySettings, setMessage = setNtfyMessage) {
+    const normalizedSettings = normalizeNtfySettings(settings);
+
+    if (!normalizedSettings.topic) {
+      setMessage("Notification setup is not ready yet.", "warning");
+      return;
+    }
+
+    setMessage("Sending notification test...");
+
+    try {
+      const response = await fetch(
+        `${normalizedSettings.serverUrl}/${encodeURIComponent(normalizedSettings.topic)}`,
+        {
+          method: "POST",
+          headers: {
+            Title: "Exam Calendar test",
+            Priority: "4",
+            Tags: "calendar",
+          },
+          body: "Exam Calendar can send reminders here.",
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`ntfy test failed with ${response.status}`);
+      }
+
+      setMessage(
+        normalizedSettings.enabled
+          ? "Test sent. Check your phone."
+          : "Test sent. Turn on Enable and save settings to schedule reminders.",
+        normalizedSettings.enabled ? "success" : "warning",
+      );
+    } catch (error) {
+      console.error("Failed to send ntfy test", error);
+      setMessage("Could not send the notification test. Try again.", "warning");
+    }
+  }
+
+  async function regenerateNtfyTopic({ setup = false } = {}) {
+    if (setup) {
+      syncSetupDraftFromDom();
+    } else {
+      await enqueueNtfyOperation("topic_regenerate_cancel", () =>
+        cancelNtfyReminderStagesForEvents(state.events, persistedNtfySettings),
+      );
+    }
+
+    state.ntfySettings = buildNtfySettings({
+      enabled: true,
+      topic: generateNtfyTopic(),
+    });
+
+    if (setup) {
+      render();
+      return;
+    }
+
+    syncAccountNtfyForm();
+    setNtfyMessage("Notification channel regenerated.");
+  }
+
+  function getResolvedReminder(eventRecord, ntfySettings = state.ntfySettings) {
+    const reminder = eventRecord.reminder ?? {};
+    const inheritedMode =
+      eventRecord.type === "deadline" ? ntfySettings.defaultDeadlineMode : ntfySettings.defaultExamMode;
+    const mode = reminder.mode === "use-default" || !reminder.mode ? inheritedMode : reminder.mode;
+    const times = reminder.mode === "use-default" || !reminder.times?.length ? ntfySettings.defaultTimes : reminder.times;
+
+    return {
+      mode,
+      times: times.length ? times : ntfySettings.defaultTimes,
+    };
+  }
+
+  function getNtfySequenceId(eventRecord, minutesBefore) {
+    const rawId = `${eventRecord.id}-${minutesBefore}`;
+    return rawId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80);
+  }
+
+  function getNtfySequenceUrl(ntfySettings, eventRecord, minutesBefore) {
+    return `${ntfySettings.serverUrl}/${encodeURIComponent(ntfySettings.topic)}/${encodeURIComponent(
+      getNtfySequenceId(eventRecord, minutesBefore),
+    )}`;
+  }
+
+  function getNtfyScheduleUrl(ntfySettings, eventRecord, stage) {
+    const url = new URL(getNtfySequenceUrl(ntfySettings, eventRecord, stage.minutesBefore));
+    url.searchParams.set("at", String(Math.floor(stage.sendAt.getTime() / 1000)));
+    url.searchParams.set("title", eventRecord.type === "deadline" ? "Deadline Reminder" : "Exam Reminder");
+    url.searchParams.set("priority", stage.minutesBefore <= 60 ? "5" : "4");
+    url.searchParams.set("tags", eventRecord.type === "deadline" ? "calendar" : "warning,calendar");
+    return url.toString();
+  }
+
+  function formatReminderLeadTime(minutesBefore) {
+    if (minutesBefore === 1440) {
+      return "tomorrow";
+    }
+
+    if (minutesBefore >= 60) {
+      const hours = Math.round(minutesBefore / 60);
+      return `in ${hours} hour${hours === 1 ? "" : "s"}`;
+    }
+
+    return `in ${minutesBefore} minutes`;
+  }
+
+  function getEventReminderMessage(eventRecord, minutesBefore) {
+    const label = `${eventRecord.course} ${eventRecord.event}`.trim();
+    const leadTime = formatReminderLeadTime(minutesBefore);
+
+    if (eventRecord.type === "deadline") {
+      return `${label} is due ${leadTime}.`;
+    }
+
+    return `${label} starts ${leadTime}.`;
+  }
+
+  function getEventReminderAt(eventRecord) {
+    const reminderAt = parseLocalDate(eventRecord.date);
+    const timeValue =
+      eventRecord.type === "deadline"
+        ? eventRecord.startTime || eventRecord.endTime
+        : eventRecord.startTime || eventRecord.endTime;
+
+    if (!timeValue) {
+      return getEventDueAt(eventRecord);
+    }
+
+    const [hours, minutes] = timeValue.split(":").map(Number);
+    reminderAt.setHours(hours, minutes, 0, 0);
+    return reminderAt;
+  }
+
+  function getSchedulableReminderStages(eventRecord, ntfySettings = state.ntfySettings, now = new Date()) {
+    const normalizedSettings = normalizeNtfySettings(ntfySettings);
+    const reminder = getResolvedReminder(eventRecord, normalizedSettings);
+
+    if (!normalizedSettings.enabled || !normalizedSettings.topic || reminder.mode === "off") {
+      return [];
+    }
+
+    const reminderAt = getEventReminderAt(eventRecord);
+    const maxDelayMs = NTFY_SCHEDULE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+
+    return reminder.times
+      .map((minutesBefore) => {
+        const sendAt = new Date(reminderAt.getTime() - minutesBefore * 60 * 1000);
+        return { minutesBefore, sendAt };
+      })
+      .filter(({ sendAt }) => {
+        const delayMs = sendAt.getTime() - now.getTime();
+        return delayMs > 0 && delayMs <= maxDelayMs;
+      });
+  }
+
+  async function scheduleNtfyReminderStage(eventRecord, stage, ntfySettings = state.ntfySettings) {
+    if (stage.sendAt.getTime() <= Date.now() + NTFY_MIN_FUTURE_MS) {
+      return false;
+    }
+
+    const normalizedSettings = normalizeNtfySettings(ntfySettings);
+    await sendNtfyRequest(
+      getNtfyScheduleUrl(normalizedSettings, eventRecord, stage),
+      {
+        method: "POST",
+        body: getEventReminderMessage(eventRecord, stage.minutesBefore),
+      },
+    );
+    return true;
+  }
+
+  function getBrowserReminderTimerId(eventRecord, minutesBefore) {
+    return `${eventRecord.id}-${minutesBefore}`;
+  }
+
+  function showBrowserReminderNotification(eventRecord, stage) {
+    if (!isBrowserNotificationSupported() || Notification.permission !== "granted") {
+      return;
+    }
+
+    const title = eventRecord.type === "deadline" ? "Deadline Reminder" : "Exam Reminder";
+    const body = getEventReminderMessage(eventRecord, stage.minutesBefore);
+
+    try {
+      new Notification(title, {
+        body,
+        icon: "./icon.png?v=1",
+        tag: getBrowserReminderTimerId(eventRecord, stage.minutesBefore),
+        renotify: true,
+      });
+    } catch (error) {
+      console.warn("Could not show browser reminder notification", error);
+    }
+  }
+
+  function clearBrowserReminderTimers() {
+    for (const timerId of browserReminderTimers.values()) {
+      window.clearTimeout(timerId);
+    }
+
+    browserReminderTimers = new Map();
+  }
+
+  function scheduleBrowserReminderTimers(eventsSnapshot = state.events) {
+    if (!isBrowserReminderProviderActive() || !isBrowserNotificationSupported() || Notification.permission !== "granted") {
+      clearBrowserReminderTimers();
+      return { scheduled: 0 };
+    }
+
+    clearBrowserReminderTimers();
+
+    const now = new Date();
+    const browserSettings = getBrowserReminderSettings();
+    let scheduled = 0;
+
+    for (const eventRecord of eventsSnapshot) {
+      if (isEventCompleted(eventRecord) || getEventDueAt(eventRecord).getTime() <= now.getTime()) {
+        continue;
+      }
+
+      for (const stage of getSchedulableReminderStages(eventRecord, browserSettings, now)) {
+        const delayMs = stage.sendAt.getTime() - Date.now();
+
+        if (delayMs <= NTFY_MIN_FUTURE_MS) {
+          continue;
+        }
+
+        const timerKey = getBrowserReminderTimerId(eventRecord, stage.minutesBefore);
+        const timerId = window.setTimeout(() => {
+          browserReminderTimers.delete(timerKey);
+          showBrowserReminderNotification(eventRecord, stage);
+        }, delayMs);
+
+        browserReminderTimers.set(timerKey, timerId);
+        scheduled += 1;
+      }
+    }
+
+    return { scheduled };
+  }
+
+  function refreshActiveReminderSchedules() {
+    if (isBrowserReminderProviderActive()) {
+      scheduleBrowserReminderTimers();
+      return;
+    }
+
+    requestNtfyReconcile({ force: true });
+  }
+
+  async function scheduleNtfyRemindersForEvents(eventsSnapshot = state.events, ntfySettings = state.ntfySettings) {
+    const normalizedSettings = normalizeNtfySettings(ntfySettings);
+    const expectedRevision = ntfyScheduleRevision;
+
+    if (!normalizedSettings.enabled || !normalizedSettings.topic) {
+      return { scheduled: 0, failed: 0 };
+    }
+
+    const upcomingEvents = eventsSnapshot.filter(
+      (eventRecord) => !isEventCompleted(eventRecord) && getEventDueAt(eventRecord).getTime() > Date.now(),
+    );
+    const tasks = [];
+
+    for (const eventRecord of upcomingEvents) {
+      const stages = getSchedulableReminderStages(eventRecord, normalizedSettings);
+      for (const stage of stages) {
+        tasks.push(async () => {
+          const scheduled = await scheduleNtfyReminderStage(eventRecord, stage, normalizedSettings);
+          if (scheduled) {
+            console.info(
+              `Scheduled reminder for ${eventRecord.event} ${stage.minutesBefore} minutes before.`,
+              stage.sendAt,
+            );
+            return 1;
+          }
+          return 0;
+        });
+      }
+    }
+
+    return runNtfyTasks(tasks, "Failed to schedule reminder", {
+      concurrency: 1,
+      spacingMs: NTFY_REQUEST_SPACING_MS,
+      stopOnRateLimit: true,
+      shouldContinue: () => isNtfyScheduleRevisionCurrent(expectedRevision),
+    });
+  }
+
+  async function cancelNtfyReminderStages(
+    eventRecord,
+    ntfySettings = state.ntfySettings,
+    minutesBeforeList = ALL_REMINDER_TIMES,
+  ) {
+    const normalizedSettings = normalizeNtfySettings(ntfySettings);
+
+    if (!normalizedSettings.topic) {
+      return;
+    }
+
+    for (const minutesBefore of minutesBeforeList) {
+      try {
+        await sendNtfyRequest(
+          getNtfySequenceUrl(normalizedSettings, eventRecord, minutesBefore),
+          { method: "DELETE" },
+          { ignoreNotFound: true },
+        );
+        await wait(NTFY_REQUEST_SPACING_MS);
+      } catch (error) {
+        if (isNtfyRateLimitError(error)) {
+          emitNtfyDebugLog("cancel_stopped_rate_limit", {
+            eventId: eventRecord.id || "",
+            minutesBefore: String(minutesBefore),
+          });
+          throw error;
+        }
+        console.error("Failed to cancel reminder", error);
+      }
+    }
+  }
+
+  async function cancelNtfyReminderStagesForEvents(eventsSnapshot, ntfySettings = state.ntfySettings) {
+    for (const eventRecord of eventsSnapshot) {
+      await cancelNtfyReminderStages(eventRecord, ntfySettings);
+
+      if (getRateLimitRemainingMs() > 0) {
+        break;
+      }
+    }
+  }
+
+  async function reconcileNtfyReminders({
+    eventsSnapshot = state.events,
+    nextSettings = state.ntfySettings,
+    previousSettings = persistedNtfySettings,
+  } = {}) {
+    const expectedRevision = ntfyScheduleRevision;
+    const now = new Date();
+    const normalizedNextSettings = normalizeNtfySettings(nextSettings);
+    const normalizedPreviousSettings = normalizeNtfySettings(previousSettings);
+    const topicChanged = normalizedNextSettings.topic !== normalizedPreviousSettings.topic;
+    const cancelTasks = [];
+    const scheduleTasks = [];
+
+    for (const eventRecord of eventsSnapshot) {
+      if (isEventCompleted(eventRecord) || getEventDueAt(eventRecord).getTime() <= now.getTime()) {
+        continue;
+      }
+
+      const previousStages = getSchedulableReminderStages(eventRecord, normalizedPreviousSettings, now);
+      const nextStages = getSchedulableReminderStages(eventRecord, normalizedNextSettings, now);
+      const nextMinutes = new Set(nextStages.map((stage) => stage.minutesBefore));
+      const staleMinutes = topicChanged
+        ? previousStages.map((stage) => stage.minutesBefore)
+        : previousStages
+            .map((stage) => stage.minutesBefore)
+            .filter((minutesBefore) => !nextMinutes.has(minutesBefore));
+
+      if (staleMinutes.length && normalizedPreviousSettings.topic) {
+        cancelTasks.push(async () => {
+          await cancelNtfyReminderStages(eventRecord, normalizedPreviousSettings, staleMinutes);
+          return 0;
+        });
+      }
+
+      for (const stage of nextStages) {
+        scheduleTasks.push(async () => {
+          const scheduled = await scheduleNtfyReminderStage(eventRecord, stage, normalizedNextSettings);
+          if (scheduled) {
+            console.info(
+              `Scheduled reminder for ${eventRecord.event} ${stage.minutesBefore} minutes before.`,
+              stage.sendAt,
+            );
+            return 1;
+          }
+          return 0;
+        });
+      }
+    }
+
+    emitNtfyDebugLog("reconcile_start", {
+      events: String(eventsSnapshot.length),
+      cancelTasks: String(cancelTasks.length),
+      scheduleTasks: String(scheduleTasks.length),
+    });
+
+    const cancelResult = await runNtfyTasks(cancelTasks, "Failed to cancel reminder", {
+      concurrency: 1,
+      spacingMs: NTFY_REQUEST_SPACING_MS,
+      stopOnRateLimit: true,
+      shouldContinue: () => isNtfyScheduleRevisionCurrent(expectedRevision),
+    });
+    const result =
+      getRateLimitRemainingMs() > 0 || !isNtfyScheduleRevisionCurrent(expectedRevision)
+        ? { scheduled: 0, failed: 0 }
+        : await runNtfyTasks(scheduleTasks, "Failed to schedule reminder", {
+            concurrency: 1,
+            spacingMs: NTFY_REQUEST_SPACING_MS,
+            stopOnRateLimit: true,
+            shouldContinue: () => isNtfyScheduleRevisionCurrent(expectedRevision),
+          });
+
+    emitNtfyDebugLog("reconcile_done", {
+      scheduled: String(result.scheduled),
+      failed: String(cancelResult.failed + result.failed),
+    });
+
+    return {
+      scheduled: result.scheduled,
+      failed: cancelResult.failed + result.failed,
+    };
+  }
+
+  async function reconcileNtfyRemindersFull({
+    eventsSnapshot = state.events,
+    nextSettings = state.ntfySettings,
+    previousSettings = persistedNtfySettings,
+    onProgress = null,
+  } = {}) {
+    const expectedRevision = ntfyScheduleRevision;
+    const now = new Date();
+    const normalizedNextSettings = normalizeNtfySettings(nextSettings);
+    const upcomingEvents = eventsSnapshot.filter(
+      (eventRecord) => !isEventCompleted(eventRecord) && getEventDueAt(eventRecord).getTime() > now.getTime(),
+    );
+    const scheduleTasks = [];
+
+    for (const eventRecord of upcomingEvents) {
+      const stages = getSchedulableReminderStages(eventRecord, normalizedNextSettings, now);
+      for (const stage of stages) {
+        scheduleTasks.push(async () => {
+          const scheduled = await scheduleNtfyReminderStage(eventRecord, stage, normalizedNextSettings);
+          if (scheduled) {
+            console.info(
+              `Scheduled reminder for ${eventRecord.event} ${stage.minutesBefore} minutes before.`,
+              stage.sendAt,
+            );
+            return 1;
+          }
+          return 0;
+        });
+      }
+    }
+
+    emitNtfyDebugLog("reconcile_full_start", {
+      events: String(upcomingEvents.length),
+      cancelTasks: "0",
+      scheduleTasks: String(scheduleTasks.length),
+    });
+
+    const result = await runNtfyTasks(scheduleTasks, "Failed to schedule reminder", {
+      concurrency: 1,
+      onProgress,
+      spacingMs: NTFY_REQUEST_SPACING_MS,
+      stopOnRateLimit: true,
+      shouldContinue: () => isNtfyScheduleRevisionCurrent(expectedRevision),
+    });
+
+    emitNtfyDebugLog("reconcile_full_done", {
+      scheduled: String(result.scheduled),
+      failed: String(result.failed),
+    });
+
+    return {
+      scheduled: result.scheduled,
+      failed: result.failed,
+    };
+  }
+
+  async function reconcileNtfyReminderForEvent({
+    previousEvent = null,
+    nextEvent = null,
+    previousSettings = persistedNtfySettings,
+    nextSettings = state.ntfySettings,
+  } = {}) {
+    const now = new Date();
+    const normalizedPreviousSettings = normalizeNtfySettings(previousSettings);
+    const normalizedNextSettings = normalizeNtfySettings(nextSettings);
+    const previousStages = previousEvent
+      ? getSchedulableReminderStages(previousEvent, normalizedPreviousSettings, now)
+      : [];
+    const nextStages =
+      nextEvent && !isEventCompleted(nextEvent) && getEventDueAt(nextEvent).getTime() > now.getTime()
+        ? getSchedulableReminderStages(nextEvent, normalizedNextSettings, now)
+        : [];
+    const previousMinutes = [...new Set(previousStages.map((stage) => stage.minutesBefore))];
+
+    if (previousEvent && previousMinutes.length) {
+      await cancelNtfyReminderStages(previousEvent, normalizedPreviousSettings, previousMinutes);
+    }
+
+    const tasks = nextStages.map((stage) => async () => {
+      const scheduled = await scheduleNtfyReminderStage(nextEvent, stage, normalizedNextSettings);
+      return scheduled ? 1 : 0;
+    });
+
+    return runNtfyTasks(tasks, "Failed to schedule reminder", {
+      concurrency: 1,
+      spacingMs: NTFY_REQUEST_SPACING_MS,
+      stopOnRateLimit: true,
+    });
+  }
+
+  function getEventTargetedScheduleSummary(scheduleResult) {
+    if (getRateLimitRemainingMs() > 0) {
+      return {
+        message: `Saved, but reminders are rate limited. Try again after ${formatRateLimitResumeTime()}.`,
+        tone: "warning",
+      };
+    }
+
+    if (scheduleResult.failed) {
+      return {
+        message: `Saved, but ${scheduleResult.failed} reminder${scheduleResult.failed === 1 ? "" : "s"} failed.`,
+        tone: "warning",
+      };
+    }
+
+    if (scheduleResult.scheduled) {
+      return {
+        message: `Saved. ${scheduleResult.scheduled} reminder${scheduleResult.scheduled === 1 ? "" : "s"} scheduled.`,
+        tone: "success",
+      };
+    }
+
+    return {
+      message: "Saved. No future reminders are currently schedulable for this item.",
+      tone: "warning",
+    };
+  }
+
+  function setAddEventSubmitting(isSubmitting) {
+    isAddingEvent = isSubmitting;
+    dom.submitButton.disabled = isSubmitting;
+    dom.submitButton.textContent = isSubmitting ? "Saving..." : TYPE_COPY[getSelectedType()].buttonLabel;
+  }
+
+  function setEditEventSubmitting(isSubmitting) {
+    isEditingEvent = isSubmitting;
+    dom.editSubmitButton.disabled = isSubmitting;
+    dom.editSubmitButton.textContent = isSubmitting
+      ? "Saving..."
+      : getSelectedEditType() === "exam"
+        ? "Save exam"
+        : "Save deadline";
+  }
+
+  function reportEventNtfyScheduleResult(schedulePromise) {
+    void schedulePromise
+      .then((scheduleResult) => {
+        const scheduleSummary = getEventTargetedScheduleSummary(scheduleResult);
+        setAccountSettingsMessage(scheduleSummary.message, scheduleSummary.tone);
+      })
+      .catch((error) => {
+        console.error("Failed to reconcile reminder for saved event", error);
+        const message = isNtfyRateLimitError(error)
+          ? `Saved, but reminders are rate limited. Try again after ${formatRateLimitResumeTime()}.`
+          : "Saved, but reminder scheduling failed. Try again after checking the console.";
+        setAccountSettingsMessage(message, "warning");
+      });
+  }
+
+  async function prepareBrowserRemindersForUserAction() {
+    if (!isBrowserReminderProviderActive()) {
+      return null;
+    }
+
+    if (!isBrowserNotificationSupported()) {
+      return { supported: false, granted: false };
+    }
+
+    return {
+      supported: true,
+      granted: await requestBrowserNotificationPermission(),
+    };
+  }
+
+  function reportBrowserReminderScheduleResult(permissionInfo) {
+    if (!permissionInfo?.supported) {
+      setAccountSettingsMessage("Saved. Browser notifications are not supported on this device/browser.", "warning");
+      return;
+    }
+
+    if (!permissionInfo.granted) {
+      setAccountSettingsMessage("Saved. Allow notifications from the Home Screen app to receive reminders.", "warning");
+      return;
+    }
+
+    const { scheduled } = scheduleBrowserReminderTimers();
+    setAccountSettingsMessage(
+      scheduled
+        ? `Saved. ${scheduled} browser reminder${scheduled === 1 ? "" : "s"} scheduled on this device.`
+        : "Saved. No future reminders are currently schedulable on this device.",
+      scheduled ? "success" : "warning",
+    );
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  function getNtfyErrorBody(bodyText = "") {
+    const trimmed = typeof bodyText === "string" ? bodyText.trim() : "";
+    return trimmed ? `: ${trimmed.slice(0, 180)}` : "";
+  }
+
+  function getRetryDelayMs(response, attempt) {
+    const retryAfterValue = Number(response?.headers?.get("Retry-After"));
+
+    if (Number.isFinite(retryAfterValue) && retryAfterValue > 0) {
+      return Math.max(NTFY_RATE_LIMIT_MIN_MS, retryAfterValue * 1000);
+    }
+
+    return NTFY_REQUEST_BACKOFF_MS * (attempt + 1);
+  }
+
+  function applyRateLimitCooldown(response) {
+    const retryDelayMs = getRetryDelayMs(response, 0);
+    const cooldownMs = Math.max(NTFY_RATE_LIMIT_MIN_MS, retryDelayMs || NTFY_RATE_LIMIT_DEFAULT_MS);
+    ntfyRateLimitedUntil = Date.now() + cooldownMs;
+    emitNtfyDebugLog("rate_limit_applied", {
+      status: String(response?.status || 429),
+      retryDelayMs: String(retryDelayMs || 0),
+      cooldownMs: String(cooldownMs),
+      retryAt: new Date(ntfyRateLimitedUntil).toISOString(),
+    });
+  }
+
+  async function sendNtfyRequest(url, fetchOptions, { ignoreNotFound = false } = {}) {
+    let lastError = null;
+    const requestMethod = fetchOptions?.method || "GET";
+    const requestTarget = getNtfyRequestTarget(url);
+    const traceId = nextNtfyTraceId("req");
+
+    if (getRateLimitRemainingMs() > 0) {
+      emitNtfyDebugLog("request_blocked_rate_limit", {
+        traceId,
+        method: requestMethod,
+        target: requestTarget,
+        retryAt: formatRateLimitResumeTime(),
+      });
+      throw new Error(`ntfy temporarily rate limited; retry after ${formatRateLimitResumeTime()}`);
+    }
+
+    for (let attempt = 0; attempt <= NTFY_REQUEST_MAX_RETRIES; attempt += 1) {
+      try {
+        emitNtfyDebugLog("request_start", {
+          traceId,
+          method: requestMethod,
+          target: requestTarget,
+          attempt: String(attempt + 1),
+        });
+
+        const response = await fetch(url, fetchOptions);
+
+        if (response.ok || (ignoreNotFound && response.status === 404)) {
+          emitNtfyDebugLog("request_ok", {
+            traceId,
+            method: requestMethod,
+            target: requestTarget,
+            status: String(response.status),
+            attempt: String(attempt + 1),
+          });
+          return response;
+        }
+
+        if (response.status === 429) {
+          applyRateLimitCooldown(response);
+        }
+
+        const errorBody = getNtfyErrorBody(await response.text());
+        const error = new Error(`ntfy request failed (${response.status})${errorBody}`);
+        const shouldRetry = response.status >= 500 && attempt < NTFY_REQUEST_MAX_RETRIES;
+        error.isRetryable = shouldRetry;
+
+        if (!shouldRetry) {
+          emitNtfyDebugLog("request_fail", {
+            traceId,
+            method: requestMethod,
+            target: requestTarget,
+            status: String(response.status),
+            attempt: String(attempt + 1),
+          });
+          throw error;
+        }
+
+        lastError = error;
+        emitNtfyDebugLog("request_retry", {
+          traceId,
+          method: requestMethod,
+          target: requestTarget,
+          status: String(response.status),
+          attempt: String(attempt + 1),
+        });
+        await wait(getRetryDelayMs(response, attempt));
+      } catch (error) {
+        const shouldRetry = error?.isRetryable === true && attempt < NTFY_REQUEST_MAX_RETRIES;
+
+        if (!shouldRetry) {
+          emitNtfyDebugLog("request_error", {
+            traceId,
+            method: requestMethod,
+            target: requestTarget,
+            attempt: String(attempt + 1),
+          });
+          throw error;
+        }
+
+        lastError = error;
+        emitNtfyDebugLog("request_retry_error", {
+          traceId,
+          method: requestMethod,
+          target: requestTarget,
+          attempt: String(attempt + 1),
+        });
+        await wait(NTFY_REQUEST_BACKOFF_MS * (attempt + 1));
+      }
+    }
+
+    throw lastError || new Error("ntfy request failed");
+  }
+
+  function isNtfyRateLimitError(error) {
+    const message = String(error?.message || "").toLowerCase();
+    return message.includes("rate limited") || message.includes("failed (429)");
+  }
+
+  function isNtfyDebugEnabled() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get(NTFY_DEBUG_QUERY_PARAM) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function getNtfyRequestTarget(url) {
+    try {
+      const parsed = new URL(url);
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      return segments.at(-1) || "topic";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  function logNtfyConsoleEvent(event, details = {}) {
+    const payload = {
+      ...details,
+      at: new Date().toISOString(),
+    };
+
+    if (event.includes("fail") || event.includes("error")) {
+      console.error("[ntfy]", event, payload);
+      return;
+    }
+
+    if (event.includes("retry") || event.includes("rate_limit")) {
+      console.warn("[ntfy]", event, payload);
+      return;
+    }
+
+    console.info("[ntfy]", event, payload);
+  }
+
+  function emitNtfyDebugLog(event, details = {}) {
+    logNtfyConsoleEvent(event, details);
+
+    if (!ntfyDebugEnabled) {
+      return;
+    }
+
+    const params = new URLSearchParams({
+      event,
+      ...details,
+      ts: String(Date.now()),
+    });
+    const debugPath = `/__ntfy-log?${params.toString()}`;
+
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(debugPath, "");
+      } else {
+        fetch(debugPath, { method: "GET", mode: "no-cors", cache: "no-store", keepalive: true }).catch(() => {});
+      }
+    } catch {
+      // no-op
+    }
+  }
+
+  async function runNtfyTasks(
+    tasks,
+    errorLabel = "ntfy request failed",
+    {
+      concurrency = NTFY_RECONCILE_CONCURRENCY,
+      onProgress = null,
+      spacingMs = 0,
+      stopOnRateLimit = false,
+      shouldContinue = null,
+    } = {},
+  ) {
+    let scheduled = 0;
+    let failed = 0;
+    let completed = 0;
+    let taskIndex = 0;
+    let halted = false;
+    let lastTaskStartedAt = 0;
+
+    async function worker() {
+      while (taskIndex < tasks.length && !halted) {
+        if (typeof shouldContinue === "function" && !shouldContinue()) {
+          halted = true;
+          emitNtfyDebugLog("task_queue_halted_stale_revision", {
+            errorLabel,
+            remaining: String(Math.max(0, tasks.length - taskIndex)),
+          });
+          break;
+        }
+
+        const currentIndex = taskIndex;
+        taskIndex += 1;
+
+        try {
+          const waitMs = Math.max(0, lastTaskStartedAt + spacingMs - Date.now());
+          if (waitMs > 0) {
+            await wait(waitMs);
+          }
+
+          if (typeof shouldContinue === "function" && !shouldContinue()) {
+            halted = true;
+            emitNtfyDebugLog("task_queue_halted_stale_revision", {
+              errorLabel,
+              remaining: String(Math.max(0, tasks.length - taskIndex)),
+            });
+            break;
+          }
+
+          lastTaskStartedAt = Date.now();
+
+          const result = await tasks[currentIndex]();
+          if (typeof result === "number" && result > 0) {
+            scheduled += result;
+          }
+        } catch (error) {
+          failed += 1;
+          if (stopOnRateLimit && isNtfyRateLimitError(error)) {
+            console.warn(errorLabel, error);
+          } else {
+            console.error(errorLabel, error);
+          }
+
+          if (stopOnRateLimit && isNtfyRateLimitError(error)) {
+            halted = true;
+            emitNtfyDebugLog("task_queue_halted_rate_limit", {
+              errorLabel,
+              failed: String(failed),
+              remaining: String(Math.max(0, tasks.length - taskIndex)),
+            });
+          }
+        } finally {
+          completed += 1;
+          if (typeof onProgress === "function") {
+            onProgress({
+              completed,
+              failed,
+              scheduled,
+              total: tasks.length,
+            });
+          }
+        }
+      }
+    }
+
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return { scheduled, failed };
+  }
+
+  function requestNtfyReconcile({ force = false } = {}) {
+    if (!isNtfyReminderProviderActive()) {
+      return;
+    }
+
+    if (!state.user?.id || state.bootstrapStatus !== "ready") {
+      return;
+    }
+
+    const now = Date.now();
+
+    if (!force && now - lastNtfyReconcileAt < NTFY_RECONCILE_THROTTLE_MS) {
+      return;
+    }
+
+    lastNtfyReconcileAt = now;
+    void enqueueNtfyOperation("auto_reconcile", () => reconcileNtfyReminders()).catch((error) => {
+      console.error("Automatic reminder reconciliation failed", error);
+    });
   }
 
   function getCourseBySelection(courseName) {
@@ -515,6 +1965,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.eventCourseSelect.value = getCourseNames()[0] ?? "";
     dom.eventUseCourseTimingInput.checked = false;
     setSelectedDeadlinePreset(dom.eventDeadlinePresetInputs, "");
+    dom.eventReminderModeSelect.value = "use-default";
     syncComposerUI();
     setFormMessage("");
   }
@@ -534,6 +1985,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.editEventCourseSelect.value = getCourseNames()[0] ?? "";
     dom.editEventUseCourseTimingInput.checked = false;
     setSelectedDeadlinePreset(dom.editDeadlinePresetInputs, "");
+    dom.editEventReminderModeSelect.value = "use-default";
     syncEditUI();
     setEditFormMessage("");
   }
@@ -546,6 +1998,11 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       startDate: DEFAULT_SEMESTER_START_DATE,
       endDate: DEFAULT_SEMESTER_END_DATE,
     };
+    state.ntfySettings = normalizeNtfySettings({
+      enabled: true,
+      topic: generateNtfyTopic(),
+    });
+    persistedNtfySettings = normalizeNtfySettings(state.ntfySettings);
     state.filters = { ...DEFAULT_FILTERS };
   }
 
@@ -623,6 +2080,12 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.editEventStartTimeInput.value = eventRecord.startTime ?? "";
     dom.editEventEndTimeInput.value = eventRecord.endTime ?? "";
     dom.editEventDueTimeInput.value = eventRecord.startTime ?? eventRecord.endTime ?? "";
+    dom.editEventReminderModeSelect.value =
+      eventRecord.reminder?.mode === "off"
+        ? "off"
+        : eventRecord.reminder?.mode === "selected-times"
+          ? "selected-times"
+          : "use-default";
     syncEditUI();
     setEditFormMessage("");
     openModal(dom.editModal, dom.editEventNameInput);
@@ -632,6 +2095,16 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     resetEditForm();
     closeModal(dom.editModal);
     restoreFocus();
+  }
+
+  function syncAccountNtfyForm() {
+    const ntfySettings = normalizeNtfySettings(state.ntfySettings);
+
+    dom.ntfyEnabledInput.checked = ntfySettings.enabled || Boolean(ntfySettings.topic);
+    dom.ntfyTopicInput.value = ntfySettings.topic || generateNtfyTopic();
+    dom.ntfyExamModeSelect.value = ntfySettings.defaultExamMode === "off" ? "off" : "selected-times";
+    dom.ntfyDeadlineModeSelect.value = ntfySettings.defaultDeadlineMode === "off" ? "off" : "selected-times";
+    syncReminderTimeInputs(dom.ntfyTimeInputs, ntfySettings.defaultTimes);
   }
 
   function openAccountSettings() {
@@ -644,6 +2117,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.semesterInput.value = state.preferences.semester;
     dom.semesterStartDateInput.value = state.preferences.startDate;
     dom.semesterEndDateInput.value = state.preferences.endDate;
+    syncAccountNtfyForm();
     setAccountSettingsMessage("");
     openModal(dom.accountModal, dom.semesterInput);
   }
@@ -719,6 +2193,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     semesterLabel,
     semesterStart = "",
     semesterEnd = "",
+    ntfySettings = state.ntfySettings,
     markSetupComplete = false,
   }) {
     const userId = requireUserId();
@@ -733,6 +2208,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
         semesterLabel,
         semesterStart,
         semesterEnd,
+        ntfySettings,
       },
       { markSetupComplete },
     );
@@ -742,6 +2218,8 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       startDate: savedState?.semesterStart || "",
       endDate: savedState?.semesterEnd || "",
     };
+    state.ntfySettings = normalizeNtfySettings(savedState?.ntfySettings);
+    persistedNtfySettings = normalizeNtfySettings(state.ntfySettings);
 
     return savedState;
   }
@@ -805,6 +2283,8 @@ export function createAppController({ dom, sessionService, scheduleRepository })
 
       state.events = sortEvents(schedule.events);
       state.courses = sortCourses((schedule.courses ?? []).map(normalizeCourse).filter(Boolean));
+      state.ntfySettings = normalizeNtfySettings(schedule.ntfySettings);
+      persistedNtfySettings = normalizeNtfySettings(state.ntfySettings);
 
       const loadedStartDate = normalizeDateValue(schedule.preferences?.startDate);
       const loadedEndDate = normalizeDateValue(schedule.preferences?.endDate);
@@ -825,6 +2305,8 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       };
       state.bootstrapStatus = "ready";
       render();
+      refreshActiveReminderSchedules();
+      consumeHashAction();
     } catch (error) {
       if (isAuthSequenceStale(authSequence)) {
         return;
@@ -869,6 +2351,15 @@ export function createAppController({ dom, sessionService, scheduleRepository })
           semesterStart: setupState?.semesterStart || "",
           semesterEnd: setupState?.semesterEnd || "",
         });
+        state.ntfySettings = normalizeNtfySettings(
+          setupState?.ntfySettings?.topic
+            ? setupState.ntfySettings
+            : {
+                ...setupState?.ntfySettings,
+                topic: generateNtfyTopic(),
+              },
+        );
+        persistedNtfySettings = normalizeNtfySettings(state.ntfySettings);
         renderSetupScreen();
         return;
       }
@@ -932,6 +2423,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       messageTone: state.setup.messageTone,
       isSubmitting: state.setup.isSubmitting,
     };
+    state.ntfySettings = readSetupNtfySettings();
   }
 
   function isSetupCourseStarted(setupState) {
@@ -951,6 +2443,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     event.preventDefault();
 
     const nextSetupState = readSetupFormValues();
+    const nextNtfySettings = readSetupNtfySettings();
     state.setup = {
       ...nextSetupState,
       message: "",
@@ -1007,6 +2500,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
         semesterLabel: nextSetupState.semesterLabel,
         semesterStart: nextSetupState.semesterStart,
         semesterEnd: nextSetupState.semesterEnd,
+        ntfySettings: nextNtfySettings,
         markSetupComplete: true,
       });
 
@@ -1030,6 +2524,11 @@ export function createAppController({ dom, sessionService, scheduleRepository })
 
   async function handleAddEvent(event) {
     event.preventDefault();
+
+    if (isAddingEvent) {
+      return;
+    }
+
     applyComposerCourseTimingPreset();
 
     if (!validateComposerPresetDate()) {
@@ -1053,6 +2552,10 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       endTime: eventTime.endTime,
       displayTime: eventTime.displayTime,
       notes: dom.eventNotesInput.value,
+      reminder: {
+        mode: dom.eventReminderModeSelect.value,
+        customized: dom.eventReminderModeSelect.value !== "use-default",
+      },
     });
 
     if (!isValidEvent(newEvent)) {
@@ -1060,14 +2563,41 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       return;
     }
 
-    state.events = sortEvents([...state.events, newEvent]);
-    await persistEvents();
-    render();
-    closeComposer();
+    const browserReminderPermission = await prepareBrowserRemindersForUserAction();
+    const previousEvents = state.events;
+    setAddEventSubmitting(true);
+
+    try {
+      markNtfyScheduleChanged("event_add");
+      state.events = sortEvents([...state.events, newEvent]);
+      await persistEvents();
+      render();
+      closeComposer();
+      if (isBrowserReminderProviderActive()) {
+        reportBrowserReminderScheduleResult(browserReminderPermission);
+      } else {
+        setAccountSettingsMessage("Saved. Scheduling reminders now...", "success");
+        reportEventNtfyScheduleResult(
+          enqueueNtfyOperation("event_add", () => reconcileNtfyReminderForEvent({ nextEvent: newEvent })),
+        );
+      }
+    } catch (error) {
+      state.events = previousEvents;
+      console.error("Failed to save event", error);
+      setFormMessage("This item could not be saved. Try again.", "warning");
+      render();
+    } finally {
+      setAddEventSubmitting(false);
+    }
   }
 
   async function handleEditEvent(event) {
     event.preventDefault();
+
+    if (isEditingEvent) {
+      return;
+    }
+
     applyEditCourseTimingPreset();
 
     if (!editingEventId) {
@@ -1094,6 +2624,29 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       return;
     }
 
+    const nextReminderMode = dom.editEventReminderModeSelect.value;
+    const reminderTimingChanged =
+      previousEvent.date !== dom.editEventDateInput.value ||
+      previousEvent.startTime !== eventTime.startTime ||
+      previousEvent.endTime !== eventTime.endTime ||
+      previousEvent.reminder?.mode !== nextReminderMode;
+    const nextReminder = reminderTimingChanged
+      ? {
+          ...previousEvent.reminder,
+          mode: nextReminderMode,
+          customized: nextReminderMode !== "use-default",
+          sent: [],
+          acknowledgedAt: "",
+          snoozedUntil: "",
+          lastRepeatSentAt: "",
+          actionToken: "",
+        }
+      : {
+          ...previousEvent.reminder,
+          mode: nextReminderMode,
+          customized: nextReminderMode !== "use-default",
+        };
+
     const updatedEvent = normalizeEvent({
       ...previousEvent,
       id: editingEventId,
@@ -1105,6 +2658,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       endTime: eventTime.endTime,
       displayTime: eventTime.displayTime,
       notes: dom.editEventNotesInput.value,
+      reminder: nextReminder,
     });
 
     if (!isValidEvent(updatedEvent)) {
@@ -1112,10 +2666,37 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       return;
     }
 
-    state.events = sortEvents(state.events.map((item) => (item.id === editingEventId ? updatedEvent : item)));
-    await persistEvents();
-    render();
-    closeEdit();
+    const browserReminderPermission = await prepareBrowserRemindersForUserAction();
+    const previousEvents = state.events;
+    setEditEventSubmitting(true);
+
+    try {
+      markNtfyScheduleChanged("event_edit");
+      state.events = sortEvents(state.events.map((item) => (item.id === editingEventId ? updatedEvent : item)));
+      await persistEvents();
+      render();
+      closeEdit();
+      if (isBrowserReminderProviderActive()) {
+        reportBrowserReminderScheduleResult(browserReminderPermission);
+      } else {
+        setAccountSettingsMessage("Saved. Scheduling reminders now...", "success");
+        reportEventNtfyScheduleResult(
+          enqueueNtfyOperation("event_edit", () =>
+            reconcileNtfyReminderForEvent({
+              previousEvent,
+              nextEvent: updatedEvent,
+            }),
+          ),
+        );
+      }
+    } catch (error) {
+      state.events = previousEvents;
+      console.error("Failed to save event", error);
+      setEditFormMessage("This item could not be saved. Try again.", "warning");
+      render();
+    } finally {
+      setEditEventSubmitting(false);
+    }
   }
 
   async function handleAddCourse(event) {
@@ -1185,6 +2766,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       state.courses = sortCourses(state.courses.map((course, index) => (index === editingIndex ? nextCourse : course)));
 
       if (!courseNameEquals(editingCourseOriginalName, nextCourse.name)) {
+        markNtfyScheduleChanged("course_rename");
         state.events = sortEvents(
           state.events.map((item) =>
             courseNameEquals(item.course, editingCourseOriginalName)
@@ -1196,6 +2778,9 @@ export function createAppController({ dom, sessionService, scheduleRepository })
           ),
         );
         await persistEvents();
+        void enqueueNtfyOperation("course_rename_reconcile", () => reconcileNtfyReminders()).catch((error) => {
+          console.error("Failed to reconcile reminders after course rename", error);
+        });
 
         if (courseNameEquals(state.filters.course, editingCourseOriginalName)) {
           state.filters.course = nextCourse.name;
@@ -1204,6 +2789,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
 
       await persistCourses();
       render();
+      refreshActiveReminderSchedules();
       resetCourseFormEditor();
       setCourseMessage(`${nextCourse.name} updated.`);
       dom.courseNameInput.focus();
@@ -1220,6 +2806,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       );
       await persistCourses();
       render();
+      refreshActiveReminderSchedules();
       resetCourseFormEditor();
       setCourseMessage(`${nextCourse.name} updated.`);
       dom.courseNameInput.focus();
@@ -1229,6 +2816,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     state.courses = sortCourses([...state.courses, nextCourse]);
     await persistCourses();
     render();
+    refreshActiveReminderSchedules();
     resetCourseFormEditor();
     setCourseMessage(`${nextCourse.name} added.`);
     dom.courseNameInput.focus();
@@ -1240,6 +2828,8 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     const semester = typeof dom.semesterInput.value === "string" ? dom.semesterInput.value.trim() : "";
     const startDate = normalizeDateValue(dom.semesterStartDateInput.value);
     const endDate = normalizeDateValue(dom.semesterEndDateInput.value);
+    const ntfySettings = readAccountNtfySettings();
+    const previousNtfySettings = normalizeNtfySettings(persistedNtfySettings);
 
     if (!semester) {
       setAccountSettingsMessage("Enter your semester label to save settings.", "warning");
@@ -1255,16 +2845,104 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       semesterLabel: semester,
       semesterStart: startDate,
       semesterEnd: endDate,
+      ntfySettings,
       markSetupComplete: false,
     });
+    markNtfyScheduleChanged("settings_save");
+    const scheduleResult = await enqueueNtfyOperation("settings_reconcile", () =>
+      reconcileNtfyReminders({
+        eventsSnapshot: state.events,
+        nextSettings: ntfySettings,
+        previousSettings: previousNtfySettings,
+      }),
+    );
+    persistedNtfySettings = normalizeNtfySettings(ntfySettings);
     render();
-    setAccountSettingsMessage("Settings saved.");
+    refreshActiveReminderSchedules();
+    setAccountSettingsMessage(
+      scheduleResult.failed
+        ? "Settings saved, but reminders could not fully sync."
+        : "Settings saved.",
+      scheduleResult.failed ? "warning" : "success",
+    );
+  }
+
+  async function handleManualNtfySchedule() {
+    const traceId = nextNtfyTraceId("manual");
+
+    if (!state.user?.id || state.bootstrapStatus !== "ready") {
+      emitNtfyDebugLog("manual_schedule_blocked_unready", { traceId });
+      setAccountSettingsMessage("Load your schedule first, then try scheduling again.", "warning");
+      return;
+    }
+
+    state.ntfySettings = readAccountNtfySettings();
+    const nextSettings = normalizeNtfySettings(state.ntfySettings);
+    const previousSettings = normalizeNtfySettings(persistedNtfySettings);
+
+    dom.manualNtfyScheduleButton.disabled = true;
+    markNtfyScheduleChanged("manual_reconcile");
+    emitNtfyDebugLog("manual_schedule_start", {
+      traceId,
+      topic: nextSettings.topic || "",
+      events: String(state.events.length),
+    });
+    setAccountSettingsMessage("Scheduling all reminders now...");
+
+    try {
+      const scheduleResult = await enqueueNtfyOperation("manual_reconcile", () =>
+        reconcileNtfyRemindersFull({
+          eventsSnapshot: state.events,
+          onProgress: ({ completed, total }) => {
+            setAccountSettingsMessage(`Scheduling reminders... ${completed}/${total}`);
+          },
+          nextSettings,
+          previousSettings,
+        }),
+      );
+      ntfyScheduledViewCache = null;
+
+      const rateLimitRemaining = getRateLimitRemainingMs();
+      emitNtfyDebugLog("manual_schedule_done", {
+        traceId,
+        scheduled: String(scheduleResult.scheduled),
+        failed: String(scheduleResult.failed),
+        remainingRateLimitMs: String(rateLimitRemaining),
+      });
+      setAccountSettingsMessage(
+        rateLimitRemaining > 0
+          ? `Rate limited by the notification service. Partial sync complete; try again after ${formatRateLimitResumeTime()}.`
+          : scheduleResult.failed
+          ? `Manual run finished, but ${scheduleResult.failed} reminder${scheduleResult.failed === 1 ? "" : "s"} failed.`
+          : `Manual run complete. ${scheduleResult.scheduled} reminder${
+              scheduleResult.scheduled === 1 ? "" : "s"
+            } scheduled.`,
+        rateLimitRemaining > 0 || scheduleResult.failed ? "warning" : "success",
+      );
+    } catch (error) {
+      console.error("Manual reminder scheduling failed", error);
+      emitNtfyDebugLog("manual_schedule_error", {
+        traceId,
+        message: error?.message || "unknown error",
+      });
+      setAccountSettingsMessage("Could not complete manual scheduling. Check the browser console.", "warning");
+    } finally {
+      dom.manualNtfyScheduleButton.disabled = false;
+    }
   }
 
   async function deleteEvent(eventId) {
+    const eventToDelete = state.events.find((event) => event.id === eventId);
+
+    if (eventToDelete) {
+      markNtfyScheduleChanged("event_delete");
+      await enqueueNtfyOperation("event_delete_cancel", () => cancelNtfyReminderStages(eventToDelete));
+    }
+
     state.events = state.events.filter((event) => event.id !== eventId);
     await persistEvents();
     render();
+    refreshActiveReminderSchedules();
   }
 
   async function setEventCompletion(eventId, isCompleted) {
@@ -1290,8 +2968,25 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     });
     const nextEvents = sortEvents(updatedEvents);
 
+    markNtfyScheduleChanged(isCompleted ? "deadline_complete" : "deadline_reopen");
+
+    if (isCompleted) {
+      await enqueueNtfyOperation("deadline_complete_cancel", () => cancelNtfyReminderStages(targetEvent));
+    }
+
     state.events = nextEvents;
+    if (!isCompleted) {
+      void enqueueNtfyOperation("deadline_reopen_reconcile", () =>
+        reconcileNtfyReminderForEvent({
+          previousEvent,
+          nextEvent: nextEvents.find((event) => event.id === eventId),
+        }),
+      ).catch((error) => {
+        console.error("Failed to reconcile reminder after reopening deadline", error);
+      });
+    }
     render();
+    refreshActiveReminderSchedules();
 
     try {
       await enqueueEventPersistence(nextEvents, userId);
@@ -1313,6 +3008,11 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   }
 
   async function deleteCourse(courseName) {
+    const removedEvents = state.events.filter((event) => courseNameEquals(event.course, courseName));
+
+    markNtfyScheduleChanged("course_delete");
+    await enqueueNtfyOperation("course_delete_cancel", () => cancelNtfyReminderStagesForEvents(removedEvents));
+
     state.courses = state.courses.filter((course) => !courseNameEquals(getCourseName(course), courseName));
     state.events = state.events.filter((event) => !courseNameEquals(event.course, courseName));
     await persistCourses();
@@ -1327,10 +3027,13 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     }
 
     render();
+    refreshActiveReminderSchedules();
     setCourseMessage(`${courseName} removed.`);
   }
 
   async function clearUserScheduleData() {
+    markNtfyScheduleChanged("clear_data");
+    await enqueueNtfyOperation("clear_data_cancel", () => cancelNtfyReminderStagesForEvents(state.events));
     state.events = [];
     state.courses = [];
     state.filters = { ...DEFAULT_FILTERS };
@@ -1339,6 +3042,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     await persistCourses();
     await persistEvents();
     render();
+    refreshActiveReminderSchedules();
     setAccountSettingsMessage("All schedule data cleared.");
   }
 
@@ -1352,6 +3056,15 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   function clearFilters() {
     state.filters = { ...DEFAULT_FILTERS };
     render();
+  }
+
+  function consumeHashAction() {
+    if (window.location.hash !== "#add" || state.bootstrapStatus !== "ready" || !state.user) {
+      return;
+    }
+
+    window.history.replaceState(null, document.title, `${window.location.pathname}${window.location.search}`);
+    openComposer();
   }
 
   function handleTimelineClick(event) {
@@ -1783,6 +3496,28 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.accountButton.addEventListener("click", handleAccountButtonClick);
     dom.closeAccountButton.addEventListener("click", closeAccountSettings);
     dom.accountSettingsForm.addEventListener("submit", handleSaveAccountSettings);
+    dom.accountSettingsForm.addEventListener("input", () => {
+      state.ntfySettings = readAccountNtfySettings();
+    });
+    dom.accountSettingsForm.addEventListener("change", () => {
+      state.ntfySettings = readAccountNtfySettings();
+    });
+    dom.copyNtfyTopicButton.addEventListener("click", () => {
+      void copyNtfyTopic(dom.ntfyTopicInput);
+    });
+    dom.testNtfyButton.addEventListener("click", () => {
+      state.ntfySettings = readAccountNtfySettings();
+      void sendNtfyTest(state.ntfySettings);
+    });
+    dom.regenerateNtfyTopicButton.addEventListener("click", () => {
+      void regenerateNtfyTopic();
+    });
+    dom.manualNtfyScheduleButton.addEventListener("click", () => {
+      void handleManualNtfySchedule();
+    });
+    dom.viewScheduledNtfyButton.addEventListener("click", () => {
+      void handleViewScheduledNtfy();
+    });
     dom.clearDataButton.addEventListener("click", handleClearDataClick);
   }
 
@@ -1835,6 +3570,26 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     dom.authScreen.addEventListener("submit", (event) => {
       void handleSetupSubmit(event);
     });
+    dom.authScreen.addEventListener("click", (event) => {
+      if (!(event.target instanceof Element)) {
+        return;
+      }
+
+      if (event.target.closest("#setupCopyNtfyTopicButton")) {
+        void copyNtfyTopic(dom.authScreen.querySelector("#setupNtfyTopicInput"), setSetupMessage);
+        return;
+      }
+
+      if (event.target.closest("#setupTestNtfyButton")) {
+        state.ntfySettings = readSetupNtfySettings();
+        void sendNtfyTest(state.ntfySettings, setSetupMessage);
+        return;
+      }
+
+      if (event.target.closest("#setupRegenerateNtfyTopicButton")) {
+        void regenerateNtfyTopic({ setup: true });
+      }
+    });
     dom.authScreen.addEventListener("input", () => {
       syncSetupDraftFromDom();
     });
@@ -1847,6 +3602,32 @@ export function createAppController({ dom, sessionService, scheduleRepository })
     sessionService.subscribe((user) => {
       handleAuthStateChange(user);
     });
+  }
+
+  function initNtfyReconciliation() {
+    if (isBrowserReminderProviderActive()) {
+      window.addEventListener("focus", () => {
+        scheduleBrowserReminderTimers();
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          scheduleBrowserReminderTimers();
+        }
+      });
+      return;
+    }
+
+    window.addEventListener("focus", () => {
+      requestNtfyReconcile();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        requestNtfyReconcile();
+      }
+    });
+    window.setInterval(() => {
+      requestNtfyReconcile();
+    }, NTFY_RECONCILE_INTERVAL_MS);
   }
 
   return {
@@ -1863,8 +3644,10 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       initConfirm();
       initSharedModalClose();
       initSetupFlow();
+      initNtfyReconciliation();
       initAuthSubscription();
       dom.examGrid.addEventListener("click", handleTimelineClick);
+      window.addEventListener("hashchange", consumeHashAction);
       document.addEventListener("click", handleSessionActionClick, { capture: true });
       document.addEventListener("keydown", handleKeydown);
     },

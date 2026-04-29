@@ -16,7 +16,7 @@ import {
   sortEvents,
   truncateText,
 } from "./utils.js";
-import { DEFAULT_SEMESTER_LABEL } from "./config.js";
+import { DEFAULT_SEMESTER_LABEL, REMINDER_MODE_LABELS, REMINDER_TIME_OPTIONS } from "./config.js";
 
 function hasActiveFilters(filters) {
   return filters.type !== "all" || filters.course !== "all" || filters.status !== "all";
@@ -207,7 +207,24 @@ function renderAuthScreen(dom, options) {
   `;
 }
 
-function renderSetupScreen(dom, setupState = {}) {
+function renderReminderTimeOptions(name, selectedTimes = [], disabled = false) {
+  return REMINDER_TIME_OPTIONS.map(
+    ({ value, label }) => `
+      <label class="lock-time-toggle">
+        <input
+          type="checkbox"
+          name="${escapeHtml(name)}"
+          value="${value}"
+          ${selectedTimes.includes(value) ? "checked" : ""}
+          ${disabled ? "disabled" : ""}
+        />
+        <span>${escapeHtml(label)}</span>
+      </label>
+    `,
+  ).join("");
+}
+
+function renderSetupScreen(dom, setupState = {}, ntfySettings = {}) {
   const daysMarkup = COURSE_DAY_OPTIONS.map(
     (day) => `
       <label class="weekday-option">
@@ -225,6 +242,8 @@ function renderSetupScreen(dom, setupState = {}) {
   const messageToneMarkup = setupState.message
     ? ` data-tone="${escapeHtml(setupState.messageTone || "warning")}"`
     : "";
+  const ntfyTopic = ntfySettings.topic || "";
+  const selectedReminderTimes = Array.isArray(ntfySettings.defaultTimes) ? ntfySettings.defaultTimes : [];
 
   dom.authScreen.innerHTML = `
     <section class="setup-shell" aria-live="polite">
@@ -271,6 +290,88 @@ function renderSetupScreen(dom, setupState = {}) {
             />
           </label>
         </div>
+
+        <section class="setup-section ntfy-guide" aria-labelledby="setupNtfyHeading" hidden aria-hidden="true">
+          <div class="ntfy-guide-head">
+            <div>
+              <p class="section-kicker">Notifications</p>
+              <h2 id="setupNtfyHeading">Set up ntfy reminders</h2>
+              <p class="modal-text">Install ntfy, subscribe to your private topic, and send a test from this app.</p>
+            </div>
+            <label class="ntfy-enable-toggle">
+              <input
+                id="setupNtfyEnabledInput"
+                name="setup_ntfy_enabled"
+                type="checkbox"
+                ${ntfySettings.enabled || ntfyTopic ? "checked" : ""}
+                ${setupState.isSubmitting ? "disabled" : ""}
+              />
+              <span>Enable</span>
+            </label>
+          </div>
+
+          <ol class="setup-steps">
+            <li>Install the ntfy app on your phone.</li>
+            <li>Tap subscribe and enter this topic.</li>
+            <li>Use Send Test to confirm alerts reach your phone.</li>
+          </ol>
+
+          <label class="field field-wide">
+            <span>Private ntfy topic</span>
+            <div class="copy-field">
+              <input
+                id="setupNtfyTopicInput"
+                name="setup_ntfy_topic"
+                type="text"
+                readonly
+                spellcheck="false"
+                value="${escapeHtml(ntfyTopic)}"
+                ${setupState.isSubmitting ? "disabled" : ""}
+              />
+              <button id="setupCopyNtfyTopicButton" class="ghost-button" type="button" ${
+                setupState.isSubmitting ? "disabled" : ""
+              }>Copy</button>
+            </div>
+          </label>
+
+          <div class="setup-grid">
+            <label class="field">
+              <span>Exam default</span>
+              <select id="setupNtfyExamModeSelect" name="setup_ntfy_exam_mode" ${
+                setupState.isSubmitting ? "disabled" : ""
+              }>
+                <option value="off" ${ntfySettings.defaultExamMode === "off" ? "selected" : ""}>Off</option>
+                <option value="selected-times" ${
+                  ntfySettings.defaultExamMode !== "off" ? "selected" : ""
+                }>At selected times</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Deadline default</span>
+              <select id="setupNtfyDeadlineModeSelect" name="setup_ntfy_deadline_mode" ${
+                setupState.isSubmitting ? "disabled" : ""
+              }>
+                <option value="off" ${ntfySettings.defaultDeadlineMode === "off" ? "selected" : ""}>Off</option>
+                <option value="selected-times" ${
+                  ntfySettings.defaultDeadlineMode !== "off" ? "selected" : ""
+                }>At selected times</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="reminder-time-grid" role="group" aria-label="Default ntfy timing">
+            ${renderReminderTimeOptions("setup_ntfy_time", selectedReminderTimes, setupState.isSubmitting)}
+          </div>
+
+          <div class="ntfy-guide-actions">
+            <button id="setupTestNtfyButton" class="ghost-button" type="button" ${
+              setupState.isSubmitting ? "disabled" : ""
+            }>Send Test</button>
+            <button id="setupRegenerateNtfyTopicButton" class="ghost-button" type="button" ${
+              setupState.isSubmitting ? "disabled" : ""
+            }>Regenerate Topic</button>
+          </div>
+        </section>
 
         <section class="setup-section" aria-labelledby="setupCourseHeading">
           <div class="setup-section-header">
@@ -511,7 +612,33 @@ function renderEventStatusMeta(event) {
   return `<span class="event-time">Completed ${completedAtFormatter.format(new Date(event.completedAt))}</span>`;
 }
 
-function renderEventItem(event) {
+function getReminderLabel(event, ntfySettings = {}) {
+  if (!ntfySettings.enabled) {
+    return "reminders off";
+  }
+
+  const reminderMode = event.reminder?.mode || "use-default";
+  const resolvedMode =
+    reminderMode === "use-default"
+      ? event.type === "deadline"
+        ? ntfySettings.defaultDeadlineMode
+        : ntfySettings.defaultExamMode
+      : reminderMode;
+
+  if (event.reminder?.acknowledgedAt) {
+    return "Acknowledged";
+  }
+
+  if (event.reminder?.snoozedUntil) {
+    return "Snoozed";
+  }
+
+  return reminderMode === "use-default"
+    ? `Default: ${REMINDER_MODE_LABELS[resolvedMode] || "Reminder"}`
+    : REMINDER_MODE_LABELS[resolvedMode] || "Reminder";
+}
+
+function renderEventItem(event, ntfySettings) {
   const isCompleted = isEventCompleted(event);
   const isOverdue = isEventOverdue(event);
   const statusBadge = isCompleted
@@ -555,11 +682,14 @@ function renderEventItem(event) {
           ? `<div class="event-note"><span class="note-pill">${escapeHtml(event.notes)}</span></div>`
           : ""
       }
+      <div class="event-note"><span class="note-pill reminder-pill">${escapeHtml(
+        getReminderLabel(event, ntfySettings),
+      )}</span></div>
     </article>
   `;
 }
 
-function renderDayCard(date, events, index) {
+function renderDayCard(date, events, index, ntfySettings) {
   const countdownDays = daysUntil(date);
   const allCompleted = events.every((event) => isEventCompleted(event));
   const allOverdue = events.every((event) => isEventOverdue(event));
@@ -591,13 +721,13 @@ function renderDayCard(date, events, index) {
       </div>
 
       <div class="events-stack">
-        ${events.map((event) => renderEventItem(event)).join("")}
+        ${events.map((event) => renderEventItem(event, ntfySettings)).join("")}
       </div>
     </article>
   `;
 }
 
-function renderTimelineSection(section, sectionIndex) {
+function renderTimelineSection(section, sectionIndex, ntfySettings) {
   if (!section.groupedEntries.length) {
     return "";
   }
@@ -614,12 +744,12 @@ function renderTimelineSection(section, sectionIndex) {
   return `
     ${headingMarkup}
     ${section.groupedEntries
-      .map(([date, events], index) => renderDayCard(date, events, index + sectionIndex * 10))
+      .map(([date, events], index) => renderDayCard(date, events, index + sectionIndex * 10, ntfySettings))
       .join("")}
   `;
 }
 
-function renderTimeline(dom, sections, filters, scopedEventCount) {
+function renderTimeline(dom, sections, filters, scopedEventCount, ntfySettings) {
   const hasVisibleEvents = sections.some((section) => section.groupedEntries.length);
 
   if (!hasVisibleEvents) {
@@ -637,7 +767,7 @@ function renderTimeline(dom, sections, filters, scopedEventCount) {
   }
 
   dom.examGrid.innerHTML = sections
-    .map((section, sectionIndex) => renderTimelineSection(section, sectionIndex))
+    .map((section, sectionIndex) => renderTimelineSection(section, sectionIndex, ntfySettings))
     .join("");
 }
 
@@ -719,7 +849,7 @@ export function renderApp({ dom, state }) {
 
   if (state.bootstrapStatus === "setup") {
     setShellMode(dom, "setup");
-    renderSetupScreen(dom, state.setup);
+    renderSetupScreen(dom, state.setup, state.ntfySettings);
     setAccountState(dom, {
       displayName: truncateText(state.user.displayName || "Signed in", 28),
     });
@@ -771,7 +901,7 @@ export function renderApp({ dom, state }) {
 
   renderNextEvent(dom, scopedEvents.filter((event) => !isEventCompleted(event)));
   renderStats(dom, scopedEvents);
-  renderTimeline(dom, timelineSections, state.filters, scopedEvents.length);
+  renderTimeline(dom, timelineSections, state.filters, scopedEvents.length, state.ntfySettings);
   renderCourseSelect(dom, state.courses);
   renderCourseList(dom, state.courses, state.events);
   renderCourseFilterSelect(dom, state.courses, state.filters.course);

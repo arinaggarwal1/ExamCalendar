@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Calendar View - Exam Calendar</title>
+    <link rel="icon" type="image/png" href="./icon.png?v=1" />
+    <link rel="apple-touch-icon" href="./icon.png?v=1" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#eaf3ff" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Exam Calendar" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css?v=47" />
+  </head>
+  <body>
+    <div class="page-shell calendar-page">
+      <section id="authScreen" class="auth-screen" aria-live="polite"></section>
+
+      <div class="workspace">
+        <aside class="sidebar calendar-sidebar" aria-label="Primary">
+          <div class="sidebar-brand">
+            <div class="sidebar-brand-copy">
+              <p id="calendarSidebarSemesterLabel" class="eyebrow">Spring 2026</p>
+              <h1>Calendar View</h1>
+            </div>
+            <button
+              id="sidebarToggleButton"
+              class="sidebar-toggle"
+              type="button"
+              aria-label="Open sidebar menu"
+              aria-expanded="false"
+              aria-controls="sidebarContent"
+            >
+              <span class="sidebar-toggle-line"></span>
+              <span class="sidebar-toggle-line"></span>
+              <span class="sidebar-toggle-line"></span>
+            </button>
+          </div>
+
+          <div id="sidebarContent" class="sidebar-collapsible">
+            <div class="sidebar-actions">
+              <a class="ghost-button side-button side-link" href="./index.html">Dashboard</a>
+              <a class="primary-button side-button side-link" href="./index.html#add">Add Item</a>
+            </div>
+
+            <section class="sidebar-utility" aria-label="Calendar filters">
+              <div class="sidebar-utility-head">
+                <span class="board-label">Filters</span>
+              </div>
+              <div class="filter-controls" aria-label="Filters">
+                <label class="filter-field">
+                  <span>Status</span>
+                  <select id="calendarStatusFilterSelect">
+                    <option value="all">All items</option>
+                    <option value="open">Open only</option>
+                    <option value="overdue">Overdue only</option>
+                    <option value="completed">Completed only</option>
+                  </select>
+                </label>
+                <label class="filter-field">
+                  <span>Type</span>
+                  <select id="calendarTypeFilterSelect">
+                    <option value="all">All types</option>
+                    <option value="exam">Exams</option>
+                    <option value="deadline">Deadlines</option>
+                  </select>
+                </label>
+                <button id="calendarClearFiltersButton" class="ghost-button filter-reset" type="button">
+                  Clear Filters
+                </button>
+              </div>
+              <div class="sidebar-utility-head">
+                <span class="board-label">Key</span>
+              </div>
+              <div class="legend" aria-label="Legend">
+                <span class="legend-chip"><span class="legend-dot urgent"></span> Soon</span>
+                <span class="legend-chip"><span class="legend-dot warning"></span> Stacked</span>
+                <span class="legend-chip"><span class="legend-dot overdue"></span> Overdue</span>
+                <span class="legend-chip"><span class="legend-dot completed"></span> Done</span>
+              </div>
+            </section>
+
+            <div class="sidebar-foot">
+              <button id="calendarAccountButton" class="account-button" type="button" data-auth-action="sign-out">
+                <span id="calendarAccountName" class="account-name">Account</span>
+                <span class="account-hint">Sign out</span>
+              </button>
+            </div>
+          </div>
+        </aside>
+
+        <main class="app calendar-app">
+          <section class="calendar-command" aria-labelledby="calendarTitle">
+            <div class="calendar-command-copy">
+              <p id="calendarSemesterLabel" class="eyebrow">Spring 2026</p>
+              <p id="calendarSemesterRange" class="hero-semester-range"></p>
+              <h2 id="calendarTitle">Time Atlas</h2>
+            </div>
+
+            <div class="calendar-control-deck" aria-label="Calendar controls">
+              <div class="calendar-nav-cluster">
+                <button class="calendar-icon-button" type="button" data-shift="-1" aria-label="Previous">
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M12.8 4.2 7 10l5.8 5.8" />
+                  </svg>
+                </button>
+                <button class="calendar-today-button" type="button" data-calendar-today>Today</button>
+                <button class="calendar-icon-button" type="button" data-shift="1" aria-label="Next">
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M7.2 4.2 13 10l-5.8 5.8" />
+                  </svg>
+                </button>
+              </div>
+
+              <div class="calendar-zoom-control" role="radiogroup" aria-label="Zoom">
+                <button type="button" data-view-mode="month" aria-pressed="true">Month</button>
+                <button type="button" data-view-mode="week" aria-pressed="false">Week</button>
+                <button type="button" data-view-mode="day" aria-pressed="false">Day</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="calendar-layout" aria-label="Interactive calendar">
+            <section class="calendar-stage-shell" aria-label="Calendar board">
+              <div class="calendar-stage-header">
+                <div>
+                  <p id="calendarViewKicker" class="section-kicker">Month</p>
+                  <h2 id="calendarRangeLabel"></h2>
+                </div>
+                <div id="calendarPulseStats" class="calendar-pulse-stats" aria-live="polite"></div>
+              </div>
+              <div id="calendarStage" class="calendar-stage" aria-live="polite"></div>
+            </section>
+
+            <aside id="calendarFocusPanel" class="calendar-focus-panel" aria-live="polite"></aside>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <script type="module" src="./calendar.js?v=1"></script>
+  </body>
+</html>

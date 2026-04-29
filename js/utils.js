@@ -1,6 +1,8 @@
 import {
+  DEFAULT_NTFY_SETTINGS,
   LEGACY_SAME_DAY_NOTES,
   MS_PER_DAY,
+  REMINDER_TIME_OPTIONS,
   SAME_DAY_NOTE,
   defaultExamEvents,
 } from "./config.js";
@@ -37,6 +39,108 @@ const DAY_INDEX_TO_COURSE_CODE = new Map(COURSE_DAY_OPTIONS.map(({ dayIndex, cod
 
 export function generateId(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function generateNtfyTopic() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `examcal_${crypto.randomUUID().replaceAll("-", "")}`;
+  }
+
+  return `examcal_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`;
+}
+
+function normalizeNtfyTopic(topic = "") {
+  return String(topic)
+    .trim()
+    .replace(/^https?:\/\/[^/]+\//i, "")
+    .replace(/[^A-Za-z0-9_-]/g, "")
+    .slice(0, 64);
+}
+
+function normalizeNtfyServerUrl(serverUrl = "") {
+  const normalized = String(serverUrl).trim().replace(/\/+$/, "");
+
+  if (!normalized) {
+    return DEFAULT_NTFY_SETTINGS.serverUrl;
+  }
+
+  try {
+    const url = new URL(normalized);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : DEFAULT_NTFY_SETTINGS.serverUrl;
+  } catch {
+    return DEFAULT_NTFY_SETTINGS.serverUrl;
+  }
+}
+
+const REMINDER_TIME_VALUES = new Set(REMINDER_TIME_OPTIONS.map(({ value }) => value));
+
+function normalizeReminderMode(mode = "", fallback = DEFAULT_NTFY_SETTINGS.defaultExamMode) {
+  return ["off", "selected-times", "until-ack"].includes(mode)
+    ? mode
+    : fallback;
+}
+
+function normalizeEventReminderMode(mode = "") {
+  return ["use-default", "off", "selected-times", "until-ack"].includes(mode) ? mode : "use-default";
+}
+
+function normalizeReminderTimes(times = []) {
+  if (!Array.isArray(times)) {
+    return [...DEFAULT_NTFY_SETTINGS.defaultTimes];
+  }
+
+  const normalizedTimes = times
+    .map((time) => Number(time))
+    .filter((time) => REMINDER_TIME_VALUES.has(time));
+
+  return normalizedTimes.length ? [...new Set(normalizedTimes)] : [...DEFAULT_NTFY_SETTINGS.defaultTimes];
+}
+
+export function normalizeEventReminder(rawReminder = {}) {
+  const source = rawReminder && typeof rawReminder === "object" ? rawReminder : {};
+  const sent = Array.isArray(source.sent)
+    ? source.sent
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return null;
+          }
+
+          const key = typeof entry.key === "string" ? entry.key.trim() : "";
+          const sentAt = typeof entry.sentAt === "string" ? entry.sentAt.trim() : "";
+
+          return key && sentAt ? { key, sentAt } : null;
+        })
+        .filter(Boolean)
+    : [];
+
+  return {
+    mode: normalizeEventReminderMode(source.mode),
+    times: normalizeReminderTimes(source.times),
+    customized: source.customized === true,
+    sent,
+    acknowledgedAt: isValidCompletedAt(source.acknowledgedAt) ? source.acknowledgedAt.trim() : "",
+    snoozedUntil: isValidCompletedAt(source.snoozedUntil) ? source.snoozedUntil.trim() : "",
+    lastRepeatSentAt: isValidCompletedAt(source.lastRepeatSentAt) ? source.lastRepeatSentAt.trim() : "",
+    actionToken: typeof source.actionToken === "string" ? source.actionToken.trim() : "",
+  };
+}
+
+export function normalizeNtfySettings(rawSettings = {}) {
+  const source = rawSettings && typeof rawSettings === "object" ? rawSettings : {};
+  const topic = normalizeNtfyTopic(source.topic);
+  const enabled = source.enabled === true && Boolean(topic);
+  const repeatMinutes = Number(source.repeatMinutes);
+
+  return {
+    ...DEFAULT_NTFY_SETTINGS,
+    enabled,
+    serverUrl: normalizeNtfyServerUrl(source.serverUrl),
+    topic,
+    defaultExamMode: normalizeReminderMode(source.defaultExamMode, DEFAULT_NTFY_SETTINGS.defaultExamMode),
+    defaultDeadlineMode: normalizeReminderMode(source.defaultDeadlineMode, DEFAULT_NTFY_SETTINGS.defaultDeadlineMode),
+    defaultTimes: normalizeReminderTimes(source.defaultTimes),
+    repeatMinutes: [10, 15, 30, 60].includes(repeatMinutes) ? repeatMinutes : DEFAULT_NTFY_SETTINGS.repeatMinutes,
+  };
 }
 
 export function getDefaultCourses() {
@@ -356,6 +460,7 @@ export function normalizeEvent(rawEvent = {}) {
     displayTime: rawDisplayTime || computedDisplayTime,
     notes: LEGACY_SAME_DAY_NOTES.has(normalizedNotes) ? SAME_DAY_NOTE : normalizedNotes,
     completedAt,
+    reminder: normalizeEventReminder(rawEvent.reminder),
   };
 }
 

@@ -17,6 +17,7 @@ import {
   mergeCoursesWithEvents,
   normalizeCourse,
   normalizeEvent,
+  normalizeNtfySettings,
   parseLocalDate,
   sortCourses,
 } from "../utils.js";
@@ -134,12 +135,14 @@ function normalizeUserSetupState(rawUserDocument = {}) {
   const semesterStart = normalizeStoredDateValue(rawUserDocument?.semesterStart);
   const semesterEnd = normalizeStoredDateValue(rawUserDocument?.semesterEnd);
   const hasCompletedSetup = rawUserDocument?.hasCompletedSetup === true || Boolean(storedSemesterLabel);
+  const ntfySettings = normalizeNtfySettings(rawUserDocument?.ntfySettings);
 
   return {
     hasCompletedSetup,
     semesterLabel: storedSemesterLabel,
     semesterStart,
     semesterEnd,
+    ntfySettings,
   };
 }
 
@@ -157,14 +160,21 @@ function buildUserDocument({
   semesterLabel = "",
   semesterStart = "",
   semesterEnd = "",
+  ntfySettings = null,
 }) {
-  return {
+  const document = {
     hasCompletedSetup: Boolean(hasCompletedSetup),
     semesterLabel: typeof semesterLabel === "string" ? semesterLabel.trim() : "",
     semesterStart: toFirestoreDateValue(semesterStart),
     semesterEnd: toFirestoreDateValue(semesterEnd),
     updatedAt: serverTimestamp(),
   };
+
+  if (ntfySettings) {
+    document.ntfySettings = normalizeNtfySettings(ntfySettings);
+  }
+
+  return document;
 }
 
 export function createFirestoreScheduleRepository({ firebaseConfig = FIREBASE_CONFIG } = {}) {
@@ -219,6 +229,7 @@ export function createFirestoreScheduleRepository({ firebaseConfig = FIREBASE_CO
       semesterLabel: currentUserState.semesterLabel || legacySchedule.preferences?.semester || DEFAULT_SEMESTER_LABEL,
       semesterStart: currentUserState.semesterStart || legacySchedule.preferences?.startDate || "",
       semesterEnd: currentUserState.semesterEnd || legacySchedule.preferences?.endDate || "",
+      ntfySettings: currentUserState.ntfySettings,
     };
 
     await setDoc(getUserDocumentRef(userId), buildUserDocument(promotedState), { merge: true });
@@ -233,6 +244,7 @@ export function createFirestoreScheduleRepository({ firebaseConfig = FIREBASE_CO
         semesterLabel: "",
         semesterStart: "",
         semesterEnd: "",
+        ntfySettings: normalizeNtfySettings(),
         ...overrides,
       };
 
@@ -309,18 +321,28 @@ export function createFirestoreScheduleRepository({ firebaseConfig = FIREBASE_CO
           };
 
       if (!schedule) {
-        return normalizeSchedule({
-          events: [],
-          courses: [],
-          preferences: userPreferences,
-        });
+        return {
+          ...normalizeSchedule({
+            events: [],
+            courses: [],
+            preferences: userPreferences,
+          }),
+          ntfySettings: userSnapshot.exists()
+            ? normalizeNtfySettings(userSnapshot.data()?.ntfySettings)
+            : normalizeNtfySettings(),
+        };
       }
 
-      return normalizeSchedule({
-        events: schedule.events,
-        courses: schedule.courses,
-        preferences: userPreferences,
-      });
+      return {
+        ...normalizeSchedule({
+          events: schedule.events,
+          courses: schedule.courses,
+          preferences: userPreferences,
+        }),
+        ntfySettings: userSnapshot.exists()
+          ? normalizeNtfySettings(userSnapshot.data()?.ntfySettings)
+          : normalizeNtfySettings(),
+      };
     },
 
     async saveEvents(userId, events) {
@@ -345,7 +367,11 @@ export function createFirestoreScheduleRepository({ firebaseConfig = FIREBASE_CO
       });
     },
 
-    async saveSemesterSettings(userId, { semesterLabel, semesterStart = "", semesterEnd = "" }, options = {}) {
+    async saveSemesterSettings(
+      userId,
+      { semesterLabel, semesterStart = "", semesterEnd = "", ntfySettings = null },
+      options = {},
+    ) {
       const normalizedUserId = requireUserId(userId);
       const existingSetupState = await this.checkUserSetupState(normalizedUserId);
       const nextSetupState = {
@@ -353,6 +379,7 @@ export function createFirestoreScheduleRepository({ firebaseConfig = FIREBASE_CO
         semesterLabel: typeof semesterLabel === "string" ? semesterLabel.trim() : "",
         semesterStart: normalizeDateValue(semesterStart),
         semesterEnd: normalizeDateValue(semesterEnd),
+        ntfySettings: ntfySettings ? normalizeNtfySettings(ntfySettings) : existingSetupState.ntfySettings,
       };
 
       await setDoc(getUserDocumentRef(normalizedUserId), buildUserDocument(nextSetupState), { merge: true });
