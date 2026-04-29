@@ -52,15 +52,14 @@
                 <span class="board-label">Filters</span>
               </div>
               <div class="filter-controls" aria-label="Filters">
-                <label class="filter-field">
-                  <span>Status</span>
-                  <select id="statusFilterSelect">
-                    <option value="all">All items</option>
-                    <option value="open">Open only</option>
-                    <option value="overdue">Overdue only</option>
-                    <option value="completed">Completed only</option>
-                  </select>
-                </label>
+                <fieldset class="filter-field status-filter-field">
+                  <legend>Status</legend>
+                  <div class="status-filter-group" role="group" aria-label="Status filter">
+                    <button class="status-filter-button" type="button" data-status-filter="open">Open</button>
+                    <button class="status-filter-button" type="button" data-status-filter="overdue">Overdue</button>
+                    <button class="status-filter-button" type="button" data-status-filter="completed">Done</button>
+                  </div>
+                </fieldset>
                 <label class="filter-field">
                   <span>Course</span>
                   <select id="courseFilterSelect"></select>

@@ -18,8 +18,32 @@ import {
 } from "./utils.js";
 import { DEFAULT_SEMESTER_LABEL } from "./config.js";
 
+const DEFAULT_STATUS_FILTERS = ["open", "overdue"];
+const STATUS_FILTERS = new Set(["open", "overdue", "completed"]);
+
+function getSelectedStatusFilters(filters) {
+  if (Array.isArray(filters.statuses)) {
+    return filters.statuses.filter((status) => STATUS_FILTERS.has(status));
+  }
+
+  if (STATUS_FILTERS.has(filters.status)) {
+    return [filters.status];
+  }
+
+  return [...DEFAULT_STATUS_FILTERS];
+}
+
+function hasDefaultStatusFilters(filters) {
+  const selectedStatuses = getSelectedStatusFilters(filters);
+
+  return (
+    selectedStatuses.length === DEFAULT_STATUS_FILTERS.length &&
+    DEFAULT_STATUS_FILTERS.every((status) => selectedStatuses.includes(status))
+  );
+}
+
 function hasActiveFilters(filters) {
-  return filters.type !== "all" || filters.course !== "all" || filters.status !== "all";
+  return filters.type !== "all" || filters.course !== "all" || !hasDefaultStatusFilters(filters);
 }
 
 function applyTypeCourseFilters(events, filters) {
@@ -30,25 +54,27 @@ function applyTypeCourseFilters(events, filters) {
   });
 }
 
-function matchesStatusFilter(event, statusFilter) {
-  if (statusFilter === "all") {
-    return true;
+function matchesStatusFilter(event, selectedStatuses) {
+  if (!selectedStatuses.length) {
+    return false;
   }
 
-  if (statusFilter === "completed") {
-    return isEventCompleted(event);
+  if (isEventCompleted(event)) {
+    return selectedStatuses.includes("completed");
   }
 
-  if (statusFilter === "overdue") {
-    return isEventOverdue(event);
+  if (isEventOverdue(event)) {
+    return selectedStatuses.includes("overdue");
   }
 
-  return !isEventCompleted(event);
+  return selectedStatuses.includes("open");
 }
 
 function applyFilters(events, filters) {
+  const selectedStatuses = getSelectedStatusFilters(filters);
+
   return applyTypeCourseFilters(events, filters).filter((event) =>
-    matchesStatusFilter(event, filters.status),
+    matchesStatusFilter(event, selectedStatuses),
   );
 }
 
@@ -346,6 +372,17 @@ function renderCourseFilterSelect(dom, courses, selectedCourse) {
   dom.courseFilterSelect.value = courseNames.includes(selectedCourse) ? selectedCourse : "all";
 }
 
+function updateStatusFilterButtons(dom, selectedStatuses, disabled = false) {
+  const selectedStatusSet = new Set(selectedStatuses);
+
+  dom.statusFilterButtons.forEach((button) => {
+    const isSelected = selectedStatusSet.has(button.dataset.statusFilter);
+    button.classList.toggle("is-selected", isSelected);
+    button.setAttribute("aria-pressed", String(isSelected));
+    button.disabled = disabled;
+  });
+}
+
 function renderCourseSelectElement(selectElement, courses, emptyLabel) {
   if (!selectElement) {
     return;
@@ -472,11 +509,11 @@ function renderStats(dom, events) {
 }
 
 function getEmptyTimelineCopy(filters, scopedEventCount) {
-  if (filters.status !== "all" && scopedEventCount > 0) {
+  if (!hasDefaultStatusFilters(filters) && scopedEventCount > 0) {
     return {
       kicker: "No Matches",
       title: "No items match that status.",
-      body: "Switch the Show filter back to All items to review the full timeline.",
+      body: "Adjust the status toggles to review other items.",
     };
   }
 
@@ -646,10 +683,9 @@ function disableAuthenticatedControls(dom) {
   renderCourseList(dom, [], []);
   renderCourseFilterSelect(dom, [], "all");
   dom.typeFilterSelect.value = "all";
-  dom.statusFilterSelect.value = "all";
   dom.typeFilterSelect.disabled = true;
   dom.courseFilterSelect.disabled = true;
-  dom.statusFilterSelect.disabled = true;
+  updateStatusFilterButtons(dom, DEFAULT_STATUS_FILTERS, true);
   dom.clearFiltersButton.disabled = true;
   if (dom.editEventCourseSelect) {
     dom.editEventCourseSelect.disabled = true;
@@ -777,10 +813,9 @@ export function renderApp({ dom, state }) {
   renderCourseFilterSelect(dom, state.courses, state.filters.course);
 
   dom.typeFilterSelect.value = state.filters.type;
-  dom.statusFilterSelect.value = state.filters.status;
   dom.typeFilterSelect.disabled = false;
   dom.courseFilterSelect.disabled = false;
-  dom.statusFilterSelect.disabled = false;
+  updateStatusFilterButtons(dom, getSelectedStatusFilters(state.filters), false);
   dom.clearFiltersButton.disabled = !hasActiveFilters(state.filters);
   dom.openComposerButton.disabled = false;
   dom.openCoursesButton.disabled = false;

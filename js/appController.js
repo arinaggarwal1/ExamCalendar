@@ -50,10 +50,18 @@ function createDefaultSetupState(overrides = {}) {
 const DEFAULT_FILTERS = {
   type: "all",
   course: "all",
-  status: "all",
+  statuses: ["open", "overdue"],
 };
 
-const STATUS_FILTERS = new Set(["all", "open", "overdue", "completed"]);
+const STATUS_FILTERS = new Set(["open", "overdue", "completed"]);
+const STATUS_FILTER_ORDER = ["open", "overdue", "completed"];
+
+function createDefaultFilters() {
+  return {
+    ...DEFAULT_FILTERS,
+    statuses: [...DEFAULT_FILTERS.statuses],
+  };
+}
 
 export function createAppController({ dom, sessionService, scheduleRepository }) {
   const state = {
@@ -69,7 +77,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       startDate: DEFAULT_SEMESTER_START_DATE,
       endDate: DEFAULT_SEMESTER_END_DATE,
     },
-    filters: { ...DEFAULT_FILTERS },
+    filters: createDefaultFilters(),
     setup: createDefaultSetupState(),
   };
 
@@ -452,8 +460,13 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       state.filters.type = "all";
     }
 
-    if (!STATUS_FILTERS.has(state.filters.status)) {
-      state.filters.status = DEFAULT_FILTERS.status;
+    if (!Array.isArray(state.filters.statuses)) {
+      state.filters.statuses = STATUS_FILTERS.has(state.filters.status)
+        ? [state.filters.status]
+        : [...DEFAULT_FILTERS.statuses];
+      delete state.filters.status;
+    } else {
+      state.filters.statuses = state.filters.statuses.filter((status) => STATUS_FILTERS.has(status));
     }
 
     if (state.filters.course !== "all" && !getCourseNames().includes(state.filters.course)) {
@@ -546,7 +559,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
       startDate: DEFAULT_SEMESTER_START_DATE,
       endDate: DEFAULT_SEMESTER_END_DATE,
     };
-    state.filters = { ...DEFAULT_FILTERS };
+    state.filters = createDefaultFilters();
   }
 
   function resetDeleteAccountModalState() {
@@ -1333,7 +1346,7 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   async function clearUserScheduleData() {
     state.events = [];
     state.courses = [];
-    state.filters = { ...DEFAULT_FILTERS };
+    state.filters = createDefaultFilters();
     resetCourseFormEditor();
     resetEditForm();
     await persistCourses();
@@ -1345,12 +1358,30 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   function handleFilterChange() {
     state.filters.type = dom.typeFilterSelect.value;
     state.filters.course = dom.courseFilterSelect.value;
-    state.filters.status = dom.statusFilterSelect.value;
+    render();
+  }
+
+  function handleStatusFilterClick(event) {
+    const status = event.currentTarget?.dataset?.statusFilter;
+
+    if (!STATUS_FILTERS.has(status)) {
+      return;
+    }
+
+    const selectedStatuses = new Set(state.filters.statuses ?? []);
+
+    if (selectedStatuses.has(status)) {
+      selectedStatuses.delete(status);
+    } else {
+      selectedStatuses.add(status);
+    }
+
+    state.filters.statuses = STATUS_FILTER_ORDER.filter((item) => selectedStatuses.has(item));
     render();
   }
 
   function clearFilters() {
-    state.filters = { ...DEFAULT_FILTERS };
+    state.filters = createDefaultFilters();
     render();
   }
 
@@ -1686,7 +1717,9 @@ export function createAppController({ dom, sessionService, scheduleRepository })
   function initFilters() {
     dom.typeFilterSelect.addEventListener("change", handleFilterChange);
     dom.courseFilterSelect.addEventListener("change", handleFilterChange);
-    dom.statusFilterSelect.addEventListener("change", handleFilterChange);
+    dom.statusFilterButtons.forEach((button) => {
+      button.addEventListener("click", handleStatusFilterClick);
+    });
     dom.clearFiltersButton.addEventListener("click", clearFilters);
   }
 

@@ -463,7 +463,8 @@ body::before {
   gap: 4px;
 }
 
-.sidebar .filter-field span {
+.sidebar .filter-field span,
+.sidebar .filter-field legend {
   color: rgba(221, 238, 255, 0.78);
   font-size: 0.72rem;
 }
@@ -483,6 +484,38 @@ body::before {
 .sidebar .filter-field select:focus {
   border-color: rgba(255, 255, 255, 0.45);
   box-shadow: 0 0 0 3px rgba(167, 216, 255, 0.22);
+}
+
+.sidebar .status-filter-group {
+  min-height: 38px;
+  min-width: 0;
+  width: 100%;
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.sidebar .status-filter-button {
+  color: rgba(246, 251, 255, 0.78);
+  font-size: 0.76rem;
+  overflow: hidden;
+  padding: 6px 4px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar .status-filter-button:hover {
+  color: #f6fbff;
+}
+
+.sidebar .status-filter-button:focus-visible {
+  box-shadow: 0 0 0 3px rgba(167, 216, 255, 0.22);
+}
+
+.sidebar .status-filter-button.is-selected {
+  background: #ffffff;
+  color: #12315b;
+  box-shadow: 0 8px 18px rgba(8, 17, 31, 0.28);
 }
 
 .sidebar .filter-reset {
@@ -948,10 +981,19 @@ body::before {
   gap: 6px;
 }
 
-.filter-field span {
+.filter-field.status-filter-field {
+  border: 0;
+  margin: 0;
+  min-inline-size: 0;
+  padding: 0;
+}
+
+.filter-field span,
+.filter-field legend {
   font-size: 0.8rem;
   font-weight: 700;
   color: var(--muted);
+  padding: 0;
 }
 
 .filter-field select {
@@ -968,6 +1010,53 @@ body::before {
   outline: none;
   border-color: rgba(37, 99, 235, 0.35);
   box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1);
+}
+
+.status-filter-group {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  min-height: 46px;
+  min-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.status-filter-button {
+  appearance: none;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 3px);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 800;
+  transition: background-color 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+.status-filter-button:hover {
+  color: var(--text);
+}
+
+.status-filter-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.status-filter-button.is-selected {
+  background: var(--text);
+  color: #ffffff;
+  box-shadow: 0 8px 16px rgba(18, 32, 51, 0.14);
+}
+
+.status-filter-button:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .filter-reset {

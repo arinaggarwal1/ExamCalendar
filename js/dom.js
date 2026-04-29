@@ -18,7 +18,7 @@ export function getDom() {
     examsLeft: document.querySelector("#examsLeft"),
     typeFilterSelect: document.querySelector("#typeFilterSelect"),
     courseFilterSelect: document.querySelector("#courseFilterSelect"),
-    statusFilterSelect: document.querySelector("#statusFilterSelect"),
+    statusFilterButtons: [...document.querySelectorAll("[data-status-filter]")],
     clearFiltersButton: document.querySelector("#clearFiltersButton"),
 
     composerModal: document.querySelector("#composerModal"),
